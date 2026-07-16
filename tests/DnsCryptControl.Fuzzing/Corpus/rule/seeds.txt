@@ -1,0 +1,32 @@
+*.ads.com
+example.com
+example.com # blocked
+example.com #blocked
+example.com#blocked
+a#b
+a #b
+a# b
+a  #  b
+#whole comment
+# leading hash space
+#a b #c
+a b #c
+a b# c
+=exact.example.com
+0.0.0.0 tracker.example
+  spaced
+trailing
+	tabbed
+		twotabs
+a	#tabcomment
+a#b#c
+a b #c #d
+##
+###
+ #
+	#
+a ## b
+*.doubleclick.net # ads
+cloak.example 192.168.1.1
+last#
+#

@@ -1,0 +1,4 @@
+# Bundled default source-list cache: byte-exact, minisign-signed. Never let git
+# rewrite these bytes (line endings / BOM) - that breaks the detached signature.
+*.md binary
+*.minisig binary

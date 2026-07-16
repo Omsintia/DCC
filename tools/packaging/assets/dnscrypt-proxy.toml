@@ -1,0 +1,42 @@
+# DnsCryptControl default config (off-53-safe). Shipped by the installer; the app rewrites it via the
+# helper once the user picks resolvers. Satisfies TomlProxyConfigSafetyCheck: netprobe_timeout = 0,
+# ignore_system_dns = true, and NO bootstrap_resolvers entry ending in :53.
+#
+# NOTE on bootstrap_resolvers: dnscrypt-proxy's bootstrap is PLAIN-DNS-only, so the :443 entries
+# below never resolve anything - they are deliberate placebos that pin the setting away from the
+# built-in plaintext :53 defaults (which the kill switch would block and which would leak without
+# it). The proxy still comes up because the helper seeds the public-resolvers cache byte-exact
+# (EnsureDefaultSourceCaches) before every start, and the default server's stamp carries IP hints,
+# so no name resolution is needed until the user reconfigures.
+#
+# Default resolver: Quad9 (quad9-doh-ip4-port443-filter-pri) - DoH over 9.9.9.9 with DNSSEC
+# validation + malicious-domain blocking, and Quad9 states it does not log client IP addresses.
+# Its stamp embeds 9.9.9.9, so it comes up with no name resolution needed.
+listen_addresses = ['127.0.0.1:53', '[::1]:53']
+server_names = ['quad9-doh-ip4-port443-filter-pri']
+
+netprobe_timeout = 0
+ignore_system_dns = true
+netprobe_address = '9.9.9.9:9'
+
+bootstrap_resolvers = ['9.9.9.9:443', '1.1.1.1:443']
+
+require_dnssec = true
+cache = true
+
+[sources]
+  [sources.'public-resolvers']
+  urls = ['https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/public-resolvers.md']
+  cache_file = 'public-resolvers.md'
+  minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
+  refresh_delay = 72
+
+  # DNSCrypt anonymization relays. These live in a SEPARATE list from public-resolvers.md, so without
+  # this source the Anonymized DNS relay picker is EMPTY and anonymized DNSCrypt cannot work. The helper
+  # seeds relays.md byte-exact (EnsureDefaultSourceCaches) before every start, so the proxy loads it from
+  # cache and never attempts the boot-time download that would be FATAL off-53.
+  [sources.'relays']
+  urls = ['https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/relays.md']
+  cache_file = 'relays.md'
+  minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
+  refresh_delay = 72

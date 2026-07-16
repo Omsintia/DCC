@@ -1,0 +1,148 @@
+root = true
+
+[*.cs]
+indent_style = space
+indent_size = 4
+charset = utf-8
+end_of_line = crlf
+insert_final_newline = true
+dotnet_diagnostic.CA2300.severity = error
+dotnet_diagnostic.CA2301.severity = error
+dotnet_diagnostic.CA2302.severity = error
+dotnet_diagnostic.CA5350.severity = error
+dotnet_diagnostic.CA5351.severity = error
+dotnet_diagnostic.CA5359.severity = error
+dotnet_diagnostic.CA5363.severity = error
+dotnet_diagnostic.CA5364.severity = error
+dotnet_diagnostic.CA5386.severity = error
+
+# Test projects: xUnit test method names use underscores by convention.
+# Scope CA1707 off for tests only (production code still enforces it).
+# CA1861: inline constant arrays in Assert calls are idiomatic in tests.
+[tests/**/*.cs]
+dotnet_diagnostic.CA1707.severity = none
+dotnet_diagnostic.CA1861.severity = none
+
+# Schema: SettingValueType enum member names (Long, Float, String) mirror the
+# dnscrypt-proxy type system and are mandated by the design spec (Appendix A).
+# CA1720 (identifier contains type name) is suppressed here intentionally.
+[src/DnsCryptControl.Core/Schema/SettingValueType.cs]
+dotnet_diagnostic.CA1720.severity = none
+
+# Result<T> exposes static factory methods Ok(T) and Fail(IpcErrorCode, string)
+# that are mandated by the IPC design spec (Task 7). Every IPC response type
+# returns these factories. CA1000 ("do not declare static members on generic types")
+# conflicts with this intentional API shape; suppress it for this file only.
+[src/DnsCryptControl.Ipc/Result.cs]
+dotnet_diagnostic.CA1000.severity = none
+
+# PlatformResult<T> mirrors Ipc.Result<T>: static Ok/Fail factories are the mandated API shape.
+[src/DnsCryptControl.Platform/PlatformResult.cs]
+dotnet_diagnostic.CA1000.severity = none
+
+# IProxyServiceController.Stop() mirrors the dnscrypt-proxy service lifecycle verb and is
+# mandated by the design spec (Task 3). CA1716 ("conflicts with reserved keyword 'Stop'")
+# is suppressed here; renaming would break all downstream fakes and handler implementations.
+[src/DnsCryptControl.Platform/IProxyServiceController.cs]
+dotnet_diagnostic.CA1716.severity = none
+
+# CommandDispatcher is the IPC trust boundary: it must contain every handler fault and
+# convert it to a Result.Fail(OperationFailed) so one bad request cannot crash the helper.
+[src/DnsCryptControl.Ipc/Dispatch/CommandDispatcher.cs]
+dotnet_diagnostic.CA1031.severity = none
+
+# IpcPipeServer.RunAsync is the SYSTEM-service accept-loop fault barrier: any exception from
+# the identity resolver, ICallerVerifier.IsTrusted, framing, or dispatch must deny/close the
+# offending connection and continue the loop — never fault the privileged helper process.
+# A throwing WinVerifyTrust P/Invoke (Task 16) must fail closed, not stop the service.
+[src/DnsCryptControl.Ipc/Transport/IpcPipeServer.cs]
+dotnet_diagnostic.CA1031.severity = none
+
+# Caller verification must fail closed on ANY exception (return false), so a single
+# malformed image cannot crash the SYSTEM helper or be treated as trusted.
+[src/DnsCryptControl.Service/Windows/WinVerifyTrustCallerVerifier.cs]
+dotnet_diagnostic.CA1031.severity = none
+
+# NativeMethods: P/Invoke declarations are intentional and audited. CA1401 (P/Invokes should
+# not be visible) is suppressed because the method is internal-to-the-assembly only, and the
+# class is internal — the warning fires on partial methods under strict analysis.
+# SYSLIB1054 is informational guidance to switch to LibraryImport — already done (partial).
+[src/DnsCryptControl.Service/Windows/NativeMethods.cs]
+dotnet_diagnostic.CA1401.severity = none
+
+# ConsoleSessionUser.TryResolve is a fail-closed resolver: any exception from WindowsIdentity
+# construction or WTS token acquisition returns false (no interactive session resolved).
+# Catching System.Exception is intentional — the goal is fail-safe SID resolution, not
+# silent swallowing of logic errors elsewhere. CA1031 is suppressed for this file only.
+[src/DnsCryptControl.Service/Windows/ConsoleSessionUser.cs]
+dotnet_diagnostic.CA1031.severity = none
+
+# WindowsDiagnosticsProbe.RunWith is the read-only diagnostics fault barrier: any exception from
+# any of the four observers (ListenerObservation, ActiveResolveObservation, AdapterObservation,
+# HardeningObservation) must be contained and mapped to PlatformResult.Fail(OperationFailed) —
+# never propagated to the caller. A SecurityException/UnauthorizedAccessException from registry
+# reads or a SocketException outside LoopbackResolveProbe's own inner catch are all valid
+# fault paths. CA1031 (catch general Exception) is intentional for this file only.
+[src/DnsCryptControl.Service/Windows/WindowsDiagnosticsProbe.cs]
+dotnet_diagnostic.CA1031.severity = none
+
+# DiagnosticsSnapshot.ListenerCheck encodes the loopback IP:port directly in its property names
+# (Udp_127_0_0_1_53, Udp_IPv6Loopback_53, Tcp_127_0_0_1_53, Tcp_IPv6Loopback_53) by design per
+# contracts §3 — readable, self-documenting leak-check fields. The underscores are intentional and
+# locked; CA1707 is suppressed for this one production file (replaces the in-code pragma).
+[src/DnsCryptControl.Platform/Diagnostics/DiagnosticsSnapshot.cs]
+dotnet_diagnostic.CA1707.severity = none
+
+# BinaryVerifyInstaller.VerifyAndInstall is the supply-chain fail-closed boundary barrier (IC-12):
+# ANY exception (IO, zip corruption, crypto, service-control Win32) must be contained and mapped to
+# PlatformResult.Fail(OperationFailed) so a malformed download can never crash the SYSTEM helper or
+# leave an unverified binary running. Catching general Exception is intentional for this file only.
+[src/DnsCryptControl.Service/Supplychain/BinaryVerifyInstaller.cs]
+dotnet_diagnostic.CA1031.severity = none
+
+# DashboardViewModel.RunPollLoopAsync is a fire-and-forget Task: any exception escaping a
+# per-tick RefreshAsync that isn't caught here would go unobserved and permanently kill
+# polling, leaving a stale status surface — a safety concern for this OPSEC tool. Catching
+# general Exception per-tick (while still letting OperationCanceledException break the loop
+# on StopPolling) is intentional for this file only.
+[src/DnsCryptControl.UI/ViewModels/DashboardViewModel.cs]
+dotnet_diagnostic.CA1031.severity = none
+
+# ConfigurationViewModel.RunValidationAsync is a fire-and-forget debounced validation run
+# (E2): a fault escaping it would go unobserved and silently freeze the validation panel
+# and OPSEC warnings at stale values for the rest of the session — a safety concern for
+# this OPSEC tool. Catching general Exception per run (while OperationCanceledException is
+# still caught separately as the expected superseded-session signal) is intentional for
+# this file only.
+[src/DnsCryptControl.UI/ViewModels/ConfigurationViewModel.cs]
+dotnet_diagnostic.CA1031.severity = none
+
+# ResolversViewModel (5c C1–C3) is fail-closed by contract: LoadSnapshot degrades any
+# fault (hostile config/list read, parse) to a load-failed state instead of crashing the
+# tab, and the fire-and-forget probe session (C3) must never let a fault escape unobserved.
+# Catching general Exception in those swallow-and-degrade sites is intentional for this
+# file only — an OPSEC tool must not surface a resolver-browsing crash as a green screen.
+[src/DnsCryptControl.UI/ViewModels/ResolversViewModel.cs]
+dotnet_diagnostic.CA1031.severity = none
+
+# QueryMonitorViewModel (5e, design 2.5) is fail-closed by contract: the config read at
+# Load and the config read-modify-write for enable/disable both degrade any fault (unreadable/
+# unparseable config, transport throw) to a shown-off/typed-error state instead of crashing the
+# Query Monitor tab. Catching general Exception in those swallow-and-degrade sites is intentional
+# for this file only — a browsing-history recorder must never surface a crash as a live green view.
+[src/DnsCryptControl.UI/ViewModels/QueryMonitorViewModel.cs]
+dotnet_diagnostic.CA1031.severity = none
+
+# LogsDiagnosticsViewModel (5e, design 3.1/3.2) is fail-closed by contract: the helper status
+# fetch, the config read (capture state), and the capture-toggle write all degrade any fault to an
+# "unavailable/not-captured/typed-error" snapshot instead of crashing the tab. Catching general
+# Exception in those swallow-and-degrade sites is intentional for this file only.
+[src/DnsCryptControl.UI/ViewModels/LogsDiagnosticsViewModel.cs]
+dotnet_diagnostic.CA1031.severity = none
+
+# MainWindow owns the WinForms tray NotifyIcon + its ContextMenuStrip (Phase 5f; WPF-UI 4.x has no
+# tray control). Both are disposed deterministically in the Window's Closed handler — the correct end
+# of a WPF window's lifecycle. CA1001 flags the disposable fields because it does not model Window.Closed
+# as the disposal site; requiring IDisposable on a Window is not idiomatic. Suppressed for this file only.
+[src/DnsCryptControl.UI/Views/MainWindow.xaml.cs]
+dotnet_diagnostic.CA1001.severity = none

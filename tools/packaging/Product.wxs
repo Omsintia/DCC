@@ -1,0 +1,195 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DnsCryptControl per-machine MSI (Phase 6 packaging). Preprocessor vars supplied by build-package.ps1:
+    Version UiDir HelperDir ProxyExe CerFile TomlFile BinaryJson ScriptsDir
+  Declarative here: files, the helper LocalSystem service, Start-Menu shortcut, major-upgrade, ARP.
+  Imperative (deferred, SYSTEM) via two shipped scripts: install-actions.ps1 (ACLs, cert import, proxy
+  demand-service) and uninstall-actions.ps1 (IC-PKG fail-safe teardown + fallback + proxy/cert removal).
+  ProgramData is purged only on a TRUE uninstall (not during a major-upgrade's remove pass).
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="DnsCryptControl" Manufacturer="DnsCryptControl"
+           Version="$(var.Version)" UpgradeCode="7d3e6a41-2b9c-4f5a-9e18-0c6b2f7a4d51"
+           Scope="perMachine" InstallerVersion="500" Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of DnsCryptControl is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- ARP polish -->
+    <Icon Id="AppIcon" SourceFile="$(var.UiDir)\DnsCryptControl.UI.exe" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <!-- ARPNOMODIFY is set by WixUI_InstallDir; defining it here too is a duplicate-symbol error. -->
+    <Property Id="ARPNOREPAIR" Value="1" />
+
+    <!-- ===== Directory tree ===== -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="DnsCryptControl">
+        <Directory Id="UI_DIR" Name="ui" />
+        <Directory Id="HELPER_DIR" Name="helper" />
+        <Directory Id="SCRIPTS_DIR" Name="scripts" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="DATA_DIR" Name="DnsCryptControl">
+        <Directory Id="STATE_DIR" Name="state" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+    <StandardDirectory Id="DesktopFolder" />
+
+    <!-- ===== Components ===== -->
+    <ComponentGroup Id="CG_App">
+      <!-- Public release cert (imported to machine trust stores by install-actions) -->
+      <Component Directory="INSTALLFOLDER" Id="Cmp_Cert" Guid="*">
+        <File Source="$(var.CerFile)" Name="DnsCryptControl-Release.cer" />
+      </Component>
+
+      <!-- UI: the signed exe (keypath) + the rest of the publish harvested -->
+      <Component Directory="UI_DIR" Id="Cmp_UiExe" Guid="*">
+        <File Id="UiExe" Source="$(var.UiDir)\DnsCryptControl.UI.exe" KeyPath="yes" />
+      </Component>
+
+      <!-- Helper: the signed exe (keypath) + LocalSystem service -->
+      <Component Directory="HELPER_DIR" Id="Cmp_HelperExe" Guid="*">
+        <File Id="HelperExe" Source="$(var.HelperDir)\DnsCryptControl.Service.exe" KeyPath="yes" />
+        <ServiceInstall Id="HelperSvc" Name="DnsCryptControlHelper" DisplayName="DnsCryptControl Helper"
+                        Description="Privileged helper for DnsCryptControl (DNS protection, kill switch)."
+                        Type="ownProcess" Start="auto" Account="LocalSystem" ErrorControl="normal" Vital="yes" />
+        <ServiceControl Id="HelperSvcCtl" Name="DnsCryptControlHelper"
+                        Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+      </Component>
+
+      <!-- Install/uninstall action scripts (one file per component: unversioned -> auto-GUID needs it) -->
+      <Component Directory="SCRIPTS_DIR" Id="Cmp_InstallActions" Guid="*">
+        <File Source="$(var.ScriptsDir)\install-actions.ps1" />
+      </Component>
+      <Component Directory="SCRIPTS_DIR" Id="Cmp_UninstallActions" Guid="*">
+        <File Source="$(var.ScriptsDir)\uninstall-actions.ps1" />
+      </Component>
+      <Component Directory="SCRIPTS_DIR" Id="Cmp_Fallback" Guid="*">
+        <File Source="$(var.ScriptsDir)\uninstall-fallback.ps1" />
+      </Component>
+
+      <!-- Proxy + default config in ProgramData; installed-binary.json in state -->
+      <Component Directory="DATA_DIR" Id="Cmp_ProxyExe" Guid="*">
+        <File Source="$(var.ProxyExe)" Name="dnscrypt-proxy.exe" />
+      </Component>
+      <Component Directory="DATA_DIR" Id="Cmp_Toml" Guid="*">
+        <File Source="$(var.TomlFile)" Name="dnscrypt-proxy.toml" />
+      </Component>
+      <Component Directory="STATE_DIR" Id="Cmp_BinJson" Guid="*">
+        <File Source="$(var.BinaryJson)" Name="installed-binary.json" />
+      </Component>
+
+      <!-- Start-Menu shortcut (HKCU keypath per ICE) -->
+      <Component Directory="ProgramMenuFolder" Id="Cmp_Shortcut" Guid="*">
+        <Shortcut Id="UiShortcut" Name="DnsCryptControl" Target="[#UiExe]"
+                  WorkingDirectory="UI_DIR" Icon="AppIcon"
+                  Description="Encrypted DNS control (dnscrypt-proxy) with a kill switch." />
+        <RegistryValue Root="HKCU" Key="Software\DnsCryptControl" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+
+      <!-- OPTIONAL desktop shortcut. Created only when INSTALLDESKTOPSHORTCUT is set (the wizard's
+           checkbox; default "1"). Silent (/qn) installs get the default, so the automated VM runs and
+           an unattended install both create it unless INSTALLDESKTOPSHORTCUT=0 is passed. -->
+      <Component Directory="DesktopFolder" Id="Cmp_DesktopShortcut" Guid="*" Condition="INSTALLDESKTOPSHORTCUT">
+        <Shortcut Id="DesktopUiShortcut" Name="DnsCryptControl" Target="[#UiExe]"
+                  WorkingDirectory="UI_DIR" Icon="AppIcon"
+                  Description="Encrypted DNS control (dnscrypt-proxy) with a kill switch." />
+        <RegistryValue Root="HKCU" Key="Software\DnsCryptControl" Name="desktopshortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- The rest of each self-contained publish (everything but the two exes already declared) -->
+    <ComponentGroup Id="CG_UiRest" Directory="UI_DIR">
+      <Files Include="$(var.UiDir)\**">
+        <Exclude Files="$(var.UiDir)\DnsCryptControl.UI.exe" />
+      </Files>
+    </ComponentGroup>
+    <ComponentGroup Id="CG_HelperRest" Directory="HELPER_DIR">
+      <Files Include="$(var.HelperDir)\**">
+        <Exclude Files="$(var.HelperDir)\DnsCryptControl.Service.exe" />
+      </Files>
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="DnsCryptControl" Level="1">
+      <ComponentGroupRef Id="CG_App" />
+      <ComponentGroupRef Id="CG_UiRest" />
+      <ComponentGroupRef Id="CG_HelperRest" />
+    </Feature>
+
+    <!-- ===== Installer UI (WixUI_InstallDir) + the desktop-shortcut question ===== -->
+    <!-- Default the checkbox ON; the custom dialog below lets the user clear it. -->
+    <Property Id="INSTALLDESKTOPSHORTCUT" Value="1" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
+    <!-- Branded blue/teal artwork replacing the stock red WiX bitmaps (make-wizard-art.ps1). -->
+    <WixVariable Id="WixUIDialogBmp" Value="$(var.DialogBmp)" />
+    <WixVariable Id="WixUIBannerBmp" Value="$(var.BannerBmp)" />
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+
+    <!-- Splice a one-checkbox dialog in after the install-location step: Welcome -> License ->
+         InstallDir -> DesktopOptions -> VerifyReady -> Progress -> Exit. -->
+    <UI>
+      <Dialog Id="DesktopOptionsDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="{\WixUI_Font_Title}Options" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="340" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="Choose an optional shortcut." />
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="DesktopShortcutCheckbox" Type="CheckBox" X="25" Y="70" Width="320" Height="18"
+                 Property="INSTALLDESKTOPSHORTCUT" CheckBoxValue="1"
+                 Text="Create a shortcut for DnsCryptControl on the desktop" />
+        <Control Id="Hint" Type="Text" X="41" Y="90" Width="310" Height="24" Transparent="yes" NoPrefix="yes"
+                 Text="You can always open it from the Start menu; the app also lives in the system tray while running." />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)" />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <!-- Re-route the InstallDir Next to our dialog, and our Back/Next to keep the chain intact.
+           Conditions mirror WixUI_InstallDir's own so the standard cost/dir validation still runs. -->
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="DesktopOptionsDlg" Order="10" Condition="1" />
+      <Publish Dialog="DesktopOptionsDlg" Control="Back" Event="NewDialog" Value="InstallDirDlg" Condition="1" />
+      <Publish Dialog="DesktopOptionsDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Condition="1" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="DesktopOptionsDlg" Order="10" Condition="1" />
+    </UI>
+
+    <!-- ===== Custom actions (deferred, SYSTEM) ===== -->
+    <!-- powershell.exe resolves via PATH from SystemFolder; the absolute script path is baked in at
+         schedule time via [INSTALLFOLDER] (a directory property - see note below). -->
+    <!-- Rollback for a failed/aborted install: undo the native side effects install-actions makes (machine
+         cert import + dnscrypt-proxy service) that MSI's own file rollback does NOT track. Reuses
+         uninstall-actions.ps1 (idempotent; the helper teardown is a no-op on a fresh install). Queued Before
+         CA_InstallActions so it executes on rollback in reverse order. -->
+    <!-- An EXE custom action's command is FORMATTED AT SCHEDULE TIME, so a resolved directory property
+         like [INSTALLFOLDER] works (and [CustomActionData] does NOT - it is empty until deferred execution).
+         Absolute script path so it resolves regardless of the CA working directory. -->
+    <CustomAction Id="CA_InstallRollback" Directory="SystemFolder"
+      ExeCommand="powershell.exe -ExecutionPolicy Bypass -NonInteractive -NoProfile -File &quot;[INSTALLFOLDER]scripts\uninstall-actions.ps1&quot;"
+      Execute="rollback" Impersonate="no" Return="ignore" />
+
+    <CustomAction Id="CA_InstallActions" Directory="SystemFolder"
+      ExeCommand="powershell.exe -ExecutionPolicy Bypass -NonInteractive -NoProfile -File &quot;[INSTALLFOLDER]scripts\install-actions.ps1&quot;"
+      Execute="deferred" Impersonate="no" Return="check" />
+
+    <CustomAction Id="CA_UninstallActions" Directory="SystemFolder"
+      ExeCommand="powershell.exe -ExecutionPolicy Bypass -NonInteractive -NoProfile -File &quot;[INSTALLFOLDER]scripts\uninstall-actions.ps1&quot;"
+      Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <!-- Purge runtime data on a TRUE uninstall only (cmd expands %ProgramData% as SYSTEM = C:\ProgramData). -->
+    <CustomAction Id="CA_Purge" Directory="SystemFolder"
+      ExeCommand="cmd.exe /c rmdir /s /q &quot;%ProgramData%\DnsCryptControl&quot;"
+      Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="CA_InstallRollback" Before="CA_InstallActions" Condition="NOT Installed" />
+      <Custom Action="CA_InstallActions" After="InstallFiles" Condition="NOT Installed" />
+      <Custom Action="CA_UninstallActions" After="StopServices" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="CA_Purge" After="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

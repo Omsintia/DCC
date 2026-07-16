@@ -1,0 +1,147 @@
+<ui:FluentWindow x:Class="DnsCryptControl.UI.Views.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+    xmlns:views="clr-namespace:DnsCryptControl.UI.Views"
+    xmlns:converters="clr-namespace:DnsCryptControl.UI.Converters"
+    Title="DnsCrypt Control"
+    Icon="pack://application:,,,/Assets/DnsCryptControl.ico"
+    Width="1100" Height="720"
+    MinWidth="800" MinHeight="600"
+    ExtendsContentIntoTitleBar="True"
+    WindowBackdropType="None"
+    WindowStartupLocation="CenterScreen">
+
+    <ui:FluentWindow.Resources>
+        <!-- 5g: the title-bar status mirrors the LIVE protection status (same converter as the
+             Dashboard hero) instead of the 5a-era hard-coded "Not protected" decor. -->
+        <converters:ProtectionStatusToTextConverter x:Key="TitleStatusToText" />
+        <converters:ProtectionStatusToBrushConverter x:Key="StatusToBrush" />
+
+        <!-- 5h: mockup-style underline tabs (flat header text; the ACTIVE tab carries a 2px
+             accent underline). A plain WPF TabItem template we fully own — after the 5c
+             (InfoBar BasedOn) and 5f (TabView background) template traps, the shell tab strip
+             no longer depends on a WPF-UI control template at all. Brushes are DynamicResource
+             theme resources only. -->
+        <Style x:Key="ShellTabItemStyle" TargetType="TabItem">
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabItem">
+                        <Border x:Name="Root"
+                                Background="Transparent"
+                                BorderThickness="0,0,0,2"
+                                BorderBrush="Transparent"
+                                Padding="12,8,12,6"
+                                Margin="0,0,2,0">
+                            <ContentPresenter x:Name="HeaderPresenter"
+                                              ContentSource="Header"
+                                              VerticalAlignment="Center"
+                                              TextElement.FontSize="13"
+                                              TextElement.Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Root" Property="BorderBrush"
+                                        Value="{DynamicResource AccentFillColorDefaultBrush}" />
+                                <Setter TargetName="HeaderPresenter" Property="TextElement.Foreground"
+                                        Value="{DynamicResource TextFillColorPrimaryBrush}" />
+                                <Setter TargetName="HeaderPresenter" Property="TextElement.FontWeight"
+                                        Value="SemiBold" />
+                            </Trigger>
+                            <MultiTrigger>
+                                <MultiTrigger.Conditions>
+                                    <Condition Property="IsMouseOver" Value="True" />
+                                    <Condition Property="IsSelected" Value="False" />
+                                </MultiTrigger.Conditions>
+                                <Setter TargetName="HeaderPresenter" Property="TextElement.Foreground"
+                                        Value="{DynamicResource TextFillColorPrimaryBrush}" />
+                            </MultiTrigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Root" Property="Background"
+                                        Value="{DynamicResource ControlFillColorDefaultBrush}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </ui:FluentWindow.Resources>
+
+    <!-- Phase 5f: opaque themed background on the root grid. ApplicationThemeManager.Apply's backdrop path
+         (WindowBackdrop.RemoveBackground) sets the *window* Background to Transparent so Mica shows through;
+         it does NOT touch this grid. Without an opaque themed surface here, the translucent ui:Card content
+         sits on the bare backdrop, which follows the OS theme — so forcing Dark on a Light OS left dark text
+         on a light backdrop (white-on-white). Binding the grid to ApplicationBackgroundBrush paints a real
+         themed surface (dark in Dark, light in Light) behind the content. Trade-off: the Mica see-through
+         effect is dropped in favour of a theme-correct, always-readable surface. -->
+    <Grid Background="{DynamicResource ApplicationBackgroundBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- 5h: mockup-style chrome — brand top-left, compact live status pill top-right.
+             The pill is an overlay in the title-bar row (right-aligned, clear of the caption
+             buttons) so no WPF-UI TitleBar template slot is needed; IsHitTestVisible=False
+             keeps the whole strip draggable. -->
+        <ui:TitleBar Grid.Row="0" Title="">
+            <ui:TitleBar.Header>
+                <StackPanel Orientation="Horizontal" Margin="10,0,0,0" VerticalAlignment="Center">
+                    <ui:SymbolIcon Symbol="ShieldCheckmark24" FontSize="16" Margin="0,0,7,0"
+                                   VerticalAlignment="Center" />
+                    <TextBlock Text="DnsCrypt Control" FontSize="13" FontWeight="SemiBold"
+                               VerticalAlignment="Center" />
+                </StackPanel>
+            </ui:TitleBar.Header>
+        </ui:TitleBar>
+        <StackPanel Grid.Row="0" Orientation="Horizontal"
+                    HorizontalAlignment="Right" VerticalAlignment="Center"
+                    Margin="0,0,152,0" IsHitTestVisible="False">
+            <Ellipse Width="8" Height="8" Margin="0,1,6,0" VerticalAlignment="Center"
+                     Fill="{Binding Dashboard.Status, Converter={StaticResource StatusToBrush}, ConverterParameter=Dot}" />
+            <TextBlock FontSize="12"
+                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                       Text="{Binding Dashboard.Status, Converter={StaticResource TitleStatusToText}}" />
+        </StackPanel>
+
+        <!-- 5h: plain TabControl with our own underline TabItem template (was ui:TabView).
+             x:Names, header texts, DOCUMENT ORDER and the SelectionChanged wiring are all
+             unchanged — the VM kit anchors on TabItem control type + Name/AutomationId. -->
+        <TabControl x:Name="ShellTabView" Grid.Row="1" Margin="10,2,10,8"
+                    Background="Transparent" BorderThickness="0" Padding="0"
+                    SelectionChanged="ShellTabView_SelectionChanged">
+            <TabItem x:Name="DashboardTabItem" Header="Dashboard" Style="{StaticResource ShellTabItemStyle}">
+                <views:DashboardView DataContext="{Binding Dashboard}" />
+            </TabItem>
+            <TabItem x:Name="ResolversTabItem" Header="Resolvers" Style="{StaticResource ShellTabItemStyle}">
+                <views:ResolversView DataContext="{Binding Resolvers}" />
+            </TabItem>
+            <TabItem x:Name="FilteringTabItem" Header="Filtering" Style="{StaticResource ShellTabItemStyle}">
+                <views:FilteringView DataContext="{Binding Filtering}" />
+            </TabItem>
+            <TabItem x:Name="AnonymizedDnsTabItem" Header="Anonymized DNS" Style="{StaticResource ShellTabItemStyle}">
+                <views:AnonymizedDnsView DataContext="{Binding AnonymizedDns}" />
+            </TabItem>
+            <TabItem x:Name="QueryMonitorTabItem" Header="Query Monitor" Style="{StaticResource ShellTabItemStyle}">
+                <views:QueryMonitorView DataContext="{Binding QueryMonitor}" />
+            </TabItem>
+            <TabItem x:Name="ConfigurationTabItem" Header="Configuration" Style="{StaticResource ShellTabItemStyle}">
+                <views:ConfigurationView DataContext="{Binding Configuration}" />
+            </TabItem>
+            <TabItem x:Name="LogsDiagnosticsTabItem" Header="Logs &amp; Diagnostics" Style="{StaticResource ShellTabItemStyle}">
+                <views:LogsDiagnosticsView DataContext="{Binding LogsDiagnostics}" />
+            </TabItem>
+            <TabItem x:Name="SettingsTabItem" Header="Settings" Style="{StaticResource ShellTabItemStyle}">
+                <views:SettingsView DataContext="{Binding Settings}" />
+            </TabItem>
+        </TabControl>
+
+        <!-- The app-wide ContentDialog host (D1/vm-F1): the Resolvers "Test all latencies" consent
+             dialog resolves this via ContentDialogHost.GetForWindow(...) and shows inside it (WPF-UI
+             requires a registered host for ShowAsync to render). Last sibling + row-spanning so the
+             modal overlays the whole window at the highest Z-order (per WPF-UI placement guidance). -->
+        <ui:ContentDialogHost x:Name="RootDialogHost" Grid.Row="0" Grid.RowSpan="2" />
+        <!-- Phase 5f: the tray NotifyIcon is created in code-behind (WinForms; WPF-UI 4.x has no tray control). -->
+    </Grid>
+</ui:FluentWindow>

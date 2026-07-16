@@ -1,0 +1,195 @@
+<UserControl x:Class="DnsCryptControl.UI.Views.QueryMonitorView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+    xmlns:converters="clr-namespace:DnsCryptControl.UI.Converters"
+    xmlns:vm="clr-namespace:DnsCryptControl.UI.ViewModels"
+    mc:Ignorable="d"
+    d:DesignHeight="720" d:DesignWidth="1000">
+
+    <UserControl.Resources>
+        <converters:NullToVisibilityConverter x:Key="NullToVisibility" />
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+        <converters:InverseBoolToVisibilityConverter x:Key="InverseBoolToVisibility" />
+
+        <!-- One row in the live query stream: time, type, action (colour-coded by Severity), duration,
+             server, and the queried name. The action severity drives the colour so the view never
+             re-classifies (QueryRowViewModel.Severity is the single source, mirroring 5d's RuleRow). -->
+        <DataTemplate x:Key="QueryRowTemplate" DataType="{x:Type vm:QueryRowViewModel}">
+            <Grid Margin="0,1">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="150" />
+                    <ColumnDefinition Width="52" />
+                    <ColumnDefinition Width="82" />
+                    <ColumnDefinition Width="64" />
+                    <ColumnDefinition Width="120" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="{Binding Time}" FontFamily="Consolas" FontSize="11"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
+                <TextBlock Grid.Column="1" Text="{Binding Type}" FontFamily="Consolas" FontSize="11"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}" VerticalAlignment="Center" />
+                <TextBlock Grid.Column="2" Text="{Binding ActionLabel}" FontFamily="Consolas" FontSize="11"
+                           FontWeight="SemiBold" VerticalAlignment="Center">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding Severity}" Value="Blocked">
+                                    <Setter Property="Foreground" Value="#b42318" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Severity}" Value="Cloaked">
+                                    <Setter Property="Foreground" Value="#1b6ac9" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+                <TextBlock Grid.Column="3" Text="{Binding DurationMs, StringFormat={}{0} ms}"
+                           FontFamily="Consolas" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           HorizontalAlignment="Right" Margin="0,0,8,0" VerticalAlignment="Center" />
+                <TextBlock Grid.Column="4" Text="{Binding Server}" FontFamily="Consolas" FontSize="11"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                <TextBlock Grid.Column="5" Text="{Binding Name}" FontFamily="Consolas" FontSize="12"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+            </Grid>
+        </DataTemplate>
+
+        <!-- The consent gate (IC-QM2). Shown by the code-behind when the VM raises PendingLoggingConsent;
+             Primary => ConfirmEnableAsync, anything else => CancelEnable. DataContext is set to the VM in
+             code-behind so the path binds. -->
+        <ui:ContentDialog x:Key="EnableLoggingConsentDialog"
+                          Title="Turn on query logging?"
+                          PrimaryButtonText="Turn on logging"
+                          CloseButtonText="Cancel"
+                          DefaultButton="Close">
+            <StackPanel>
+                <TextBlock TextWrapping="Wrap"
+                           Text="Query logging records EVERY domain your device looks up — effectively your browsing history." />
+                <TextBlock TextWrapping="Wrap" Margin="0,8,0,0"
+                           Text="Entries are stored only in this app's memory and shredded from disk after each read, in a per-user location no other account can read. Nothing is sent anywhere. Turn this off (Stop &amp; clear) when you are done." />
+                <TextBlock TextWrapping="Wrap" Margin="0,8,0,0" FontFamily="Consolas" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           Text="{Binding PendingLoggingConsent.LogPath}" />
+            </StackPanel>
+        </ui:ContentDialog>
+    </UserControl.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- Config-write error (fresh RMW failed / rejected). -->
+        <ui:InfoBar Grid.Row="0" Title="Couldn't apply logging change" Severity="Error"
+                    IsOpen="True" IsClosable="False" Margin="0,0,0,8"
+                    Message="{Binding ConfigError}"
+                    Visibility="{Binding ConfigError, Converter={StaticResource NullToVisibility}}">
+            <ui:InfoBar.Style>
+                <Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" />
+            </ui:InfoBar.Style>
+        </ui:InfoBar>
+
+        <!-- ===================== OFF state: explain + enable (consent-gated). ===================== -->
+        <Border Grid.Row="1" BorderBrush="#22808080" BorderThickness="1" CornerRadius="8" Padding="16"
+                Visibility="{Binding LoggingEnabled, Converter={StaticResource InverseBoolToVisibility}}">
+            <StackPanel>
+                <TextBlock Text="Live query monitor" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                <TextBlock TextWrapping="Wrap" Margin="0,4,0,0" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           Text="See DNS lookups as they happen — resolved, blocked, cloaked or synthesized — to confirm your filters are working. Query logging is OFF by default because the stream is your browsing history." />
+                <ui:Button Content="Turn on logging…" Appearance="Primary" Margin="0,12,0,0"
+                           HorizontalAlignment="Left" Click="Enable_Click" />
+            </StackPanel>
+        </Border>
+
+        <!-- ===================== ON state: banner + toolbar + live stream. ===================== -->
+        <Grid Grid.Row="1" Visibility="{Binding LoggingEnabled, Converter={StaticResource BoolToVisibility}}">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <ui:InfoBar Grid.Row="0" Title="Query logging is ON" Severity="Warning"
+                        IsOpen="True" IsClosable="False" Margin="0,0,0,8"
+                        Message="{Binding LoggingOnBanner}"
+                        Visibility="{Binding LoggingOnBanner, Converter={StaticResource NullToVisibility}}">
+                <ui:InfoBar.Style>
+                    <Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" />
+                </ui:InfoBar.Style>
+            </ui:InfoBar>
+
+            <!-- FIX view LOW-1: surface the previously-dead HadReadError signal. Toggles per tick (that is
+                 fine — it reflects the last drain): shown when the last poll couldn't fully read the log. -->
+            <ui:InfoBar Grid.Row="1" Title="Some entries couldn't be read" Severity="Warning"
+                        IsOpen="True" IsClosable="False" Margin="0,0,0,8"
+                        Message="Some entries couldn't be read on the last check (a burst may be missing)."
+                        Visibility="{Binding HadReadError, Converter={StaticResource BoolToVisibility}}">
+                <ui:InfoBar.Style>
+                    <Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" />
+                </ui:InfoBar.Style>
+            </ui:InfoBar>
+
+            <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,6">
+                <ui:Button Content="Stop &amp; clear" Appearance="Danger" Click="StopClear_Click" Margin="0,0,8,0" />
+                <ui:Button Content="Pause" Click="Pause_Click" Margin="0,0,4,0"
+                           Visibility="{Binding IsPaused, Converter={StaticResource InverseBoolToVisibility}}" />
+                <ui:Button Content="Resume" Click="Resume_Click" Margin="0,0,4,0"
+                           Visibility="{Binding IsPaused, Converter={StaticResource BoolToVisibility}}" />
+                <ui:Button Content="Clear view" Click="Clear_Click" Margin="0,0,12,0" />
+                <ui:TextBox PlaceholderText="filter by name…" Width="200" VerticalAlignment="Center"
+                            Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,8,0" />
+                <ComboBox Width="120" VerticalAlignment="Center" Margin="0,0,12,0"
+                          ItemsSource="{Binding ActionFilters}"
+                          SelectedItem="{Binding ActionFilter, Mode=TwoWay}" />
+                <TextBlock Text="{Binding CountsHeadline}" Foreground="{DynamicResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
+            </StackPanel>
+        </Grid>
+
+        <!-- The live stream (virtualized). Header + rows. Only meaningful in the ON state. -->
+        <Border Grid.Row="2" BorderBrush="#22808080" BorderThickness="1" CornerRadius="6" Margin="0,4,0,0"
+                Visibility="{Binding LoggingEnabled, Converter={StaticResource BoolToVisibility}}">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <Grid Grid.Row="0" Margin="8,6,8,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="150" />
+                        <ColumnDefinition Width="52" />
+                        <ColumnDefinition Width="82" />
+                        <ColumnDefinition Width="64" />
+                        <ColumnDefinition Width="120" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Time" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Grid.Column="1" Text="Type" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Grid.Column="2" Text="Action" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Grid.Column="3" Text="Time (ms)" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               HorizontalAlignment="Right" Margin="0,0,8,0" />
+                    <TextBlock Grid.Column="4" Text="Server" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Grid.Column="5" Text="Name" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                </Grid>
+                <!-- 5g WP5: one-line legend for the action words a user will see in the stream. -->
+                <TextBlock Grid.Row="1" Margin="8,0,8,4"
+                           Text="PASS = answered normally · REJECT = blocked by your filters · CLOAK = answered from your cloaking rules (a substitute address or alias) · SYNTH = answered by the proxy itself, without asking any server · NXDOMAIN = the name does not exist · FORWARD = sent to the server your forwarding rules chose · OTHER = an unrecognised entry."
+                           FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" Padding="8,0,8,8">
+                    <ItemsControl ItemsSource="{Binding Rows}" ItemTemplate="{StaticResource QueryRowTemplate}"
+                                  VirtualizingPanel.IsVirtualizing="True">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <VirtualizingStackPanel />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                    </ItemsControl>
+                </ScrollViewer>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>

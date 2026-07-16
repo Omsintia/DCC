@@ -1,0 +1,9 @@
+# Never commit private key material. Only the PUBLIC .cer + thumbprint are tracked.
+*.pfx
+*.p12
+*.snk
+*.key
+
+# Release build output (produced by build-release.ps1)
+release/
+*.sha256

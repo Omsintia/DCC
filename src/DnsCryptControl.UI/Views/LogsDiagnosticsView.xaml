@@ -1,0 +1,176 @@
+<UserControl x:Class="DnsCryptControl.UI.Views.LogsDiagnosticsView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+    xmlns:converters="clr-namespace:DnsCryptControl.UI.Converters"
+    mc:Ignorable="d"
+    d:DesignHeight="720" d:DesignWidth="1000">
+
+    <UserControl.Resources>
+        <converters:NullToVisibilityConverter x:Key="NullToVisibility" />
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+        <converters:InverseBoolToVisibilityConverter x:Key="InverseBoolToVisibility" />
+        <converters:BooleanToYesNoConverter x:Key="YesNo" />
+
+        <Style x:Key="HealthLabel" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
+            <Setter Property="Margin" Value="0,0,12,3" />
+        </Style>
+        <Style x:Key="HealthValue" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}" />
+            <Setter Property="FontFamily" Value="Consolas" />
+            <Setter Property="Margin" Value="0,0,0,3" />
+        </Style>
+    </UserControl.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <ui:InfoBar Grid.Row="0" Title="Couldn't apply the change" Severity="Error"
+                    IsOpen="True" IsClosable="False" Margin="0,0,0,8"
+                    Message="{Binding ConfigError}"
+                    Visibility="{Binding ConfigError, Converter={StaticResource NullToVisibility}}">
+            <ui:InfoBar.Style>
+                <Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" />
+            </ui:InfoBar.Style>
+        </ui:InfoBar>
+
+        <!-- ===================== Health snapshot (reuses the existing status/diagnostics, IC-2). ===================== -->
+        <Border Grid.Row="1" BorderBrush="#22808080" BorderThickness="1" CornerRadius="8" Padding="16" Margin="0,0,0,12">
+            <StackPanel>
+                <Grid Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Helper &amp; proxy health" FontSize="16" FontWeight="SemiBold"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                        <ui:Button Content="Refresh" Click="Refresh_Click" Margin="0,0,6,0" />
+                        <ui:Button Content="Copy diagnostics" Click="CopyDiagnostics_Click" />
+                    </StackPanel>
+                </Grid>
+
+                <!-- 5g WP5: first plain-language prose on this tab. -->
+                <TextBlock Text="A snapshot of the two pieces working for you: the helper (a background Windows service that applies your changes) and the proxy (the program that encrypts your DNS). Use Refresh for a fresh reading — nothing here changes any settings."
+                           FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Margin="0,0,0,10" />
+
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="48" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Helper reachable" Style="{StaticResource HealthLabel}" />
+                    <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding HelperReachable, Converter={StaticResource YesNo}}" Style="{StaticResource HealthValue}" />
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Proxy" Style="{StaticResource HealthLabel}" />
+                    <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding ProxyRunning, Converter={StaticResource YesNo}, ConverterParameter=run}" Style="{StaticResource HealthValue}" />
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Protection enabled" Style="{StaticResource HealthLabel}" />
+                    <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding ProtectionEnabled, Converter={StaticResource YesNo}}" Style="{StaticResource HealthValue}" />
+                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Kill switch" Style="{StaticResource HealthLabel}" />
+                    <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding KillSwitchEnabled, Converter={StaticResource YesNo}}" Style="{StaticResource HealthValue}" />
+                    <TextBlock Grid.Row="4" Grid.Column="0" Text="Leak mitigations" Style="{StaticResource HealthLabel}" />
+                    <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding LeakMitigationsEnabled, Converter={StaticResource YesNo}}" Style="{StaticResource HealthValue}" />
+
+                    <TextBlock Grid.Row="0" Grid.Column="3" Text="Active resolver" Style="{StaticResource HealthLabel}" />
+                    <TextBlock Grid.Row="0" Grid.Column="4" Text="{Binding ActiveResolver, TargetNullValue=—}" Style="{StaticResource HealthValue}" />
+                    <TextBlock Grid.Row="1" Grid.Column="3" Text="Helper build" Style="{StaticResource HealthLabel}" />
+                    <TextBlock Grid.Row="1" Grid.Column="4" Text="{Binding HelperBuild}" Style="{StaticResource HealthValue}" />
+                    <TextBlock Grid.Row="2" Grid.Column="3" Text="Protocol version" Style="{StaticResource HealthLabel}" />
+                    <TextBlock Grid.Row="2" Grid.Column="4" Text="{Binding HelperProtocolVersion}" Style="{StaticResource HealthValue}" />
+                    <TextBlock Grid.Row="3" Grid.Column="3" Text="Version mismatch" Style="{StaticResource HealthLabel}" />
+                    <TextBlock Grid.Row="3" Grid.Column="4" Text="{Binding HelperVersionMismatch, Converter={StaticResource YesNo}}" Style="{StaticResource HealthValue}" />
+                    <TextBlock Grid.Row="4" Grid.Column="3" Text="Last refreshed (UTC)" Style="{StaticResource HealthLabel}" />
+                    <TextBlock Grid.Row="4" Grid.Column="4" Text="{Binding LastRefreshedUtc, TargetNullValue=—}" Style="{StaticResource HealthValue}" />
+                </Grid>
+
+                <!-- 5g WP5: one footnote for the three rows a non-expert can't decode. -->
+                <TextBlock Text="In plain words: 'Protocol version' is the language this app and the helper use to talk to each other. 'Version mismatch' — Yes means the app and helper come from different installs; reinstall so they match. 'Leak mitigations' are extra Windows settings that stop DNS requests from slipping around the encrypted route."
+                           FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Margin="0,8,0,0" />
+            </StackPanel>
+        </Border>
+
+        <!-- ===================== Proxy operational log (opt-in capture). ===================== -->
+        <Border Grid.Row="2" BorderBrush="#22808080" BorderThickness="1" CornerRadius="8" Padding="16">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <Grid Grid.Row="0" Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Proxy log" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                        <ui:Button Content="Capture proxy log" Click="EnableCapture_Click"
+                                   Visibility="{Binding ProxyLogCaptured, Converter={StaticResource InverseBoolToVisibility}}" Margin="0,0,6,0" />
+                        <ui:Button Content="Stop capture" Click="DisableCapture_Click"
+                                   Visibility="{Binding ProxyLogCaptured, Converter={StaticResource BoolToVisibility}}" Margin="0,0,6,0" />
+                        <ui:Button Content="Refresh" Click="Refresh_Click"
+                                   Visibility="{Binding ProxyLogCaptured, Converter={StaticResource BoolToVisibility}}" />
+                    </StackPanel>
+                </Grid>
+
+                <!-- 5g WP5: say what this log IS before the user decides to capture it. -->
+                <TextBlock Grid.Row="1"
+                           Text="The proxy's own housekeeping messages — starting up, connecting to servers, certificate checks. It is not a record of your browsing — your lookups appear in the Query Monitor tab instead. Nothing is written while capture is off — Capture simply sets the proxy's own log-file setting (the Logging section in the Configuration tab controls the same thing) — and you can stop it at any time."
+                           FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Margin="0,0,0,8" />
+
+                <ui:InfoBar Grid.Row="2" Title="Proxy log not captured" Severity="Informational"
+                            IsOpen="True" IsClosable="False" Margin="0,0,0,8"
+                            Message="{Binding NotCapturedBanner}"
+                            Visibility="{Binding NotCapturedBanner, Converter={StaticResource NullToVisibility}}">
+                    <ui:InfoBar.Style>
+                        <Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" />
+                    </ui:InfoBar.Style>
+                </ui:InfoBar>
+
+                <TextBlock Grid.Row="3" Text="{Binding ProxyLogPath}" FontFamily="Consolas" FontSize="11"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,0,0,6" TextTrimming="CharacterEllipsis"
+                           Visibility="{Binding ProxyLogCaptured, Converter={StaticResource BoolToVisibility}}" />
+
+                <Border Grid.Row="4" BorderBrush="#22808080" BorderThickness="1" CornerRadius="6"
+                        Background="#1e1e2e"
+                        Visibility="{Binding ProxyLogCaptured, Converter={StaticResource BoolToVisibility}}">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Padding="8">
+                        <ItemsControl ItemsSource="{Binding ProxyLogTail}" VirtualizingPanel.IsVirtualizing="True">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <VirtualizingStackPanel />
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding}" FontFamily="Consolas" FontSize="11"
+                                               Foreground="#cdd6f4" TextWrapping="NoWrap" />
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </Border>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>

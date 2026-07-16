@@ -1,0 +1,32 @@
+{"in":"*.ads.com","content":"*.ads.com"}
+{"in":"example.com","content":"example.com"}
+{"in":"example.com # blocked","content":"example.com"}
+{"in":"example.com #blocked","content":"example.com"}
+{"in":"example.com#blocked","content":"example.com#blocked"}
+{"in":"a#b","content":"a#b"}
+{"in":"a #b","content":"a"}
+{"in":"a# b","content":"a# b"}
+{"in":"a  #  b","content":"a"}
+{"in":"#whole comment","content":""}
+{"in":"# leading hash space","content":""}
+{"in":"#a b #c","content":""}
+{"in":"a b #c","content":"a b"}
+{"in":"a b# c","content":"a b# c"}
+{"in":"=exact.example.com","content":"=exact.example.com"}
+{"in":"0.0.0.0 tracker.example","content":"0.0.0.0 tracker.example"}
+{"in":"  spaced","content":"spaced"}
+{"in":"trailing","content":"trailing"}
+{"in":"\ttabbed","content":"tabbed"}
+{"in":"\t\ttwotabs","content":"twotabs"}
+{"in":"a\t#tabcomment","content":"a"}
+{"in":"a#b#c","content":"a#b#c"}
+{"in":"a b #c #d","content":"a b #c"}
+{"in":"##","content":""}
+{"in":"###","content":""}
+{"in":" #","content":""}
+{"in":"\t#","content":""}
+{"in":"a ## b","content":"a ## b"}
+{"in":"*.doubleclick.net # ads","content":"*.doubleclick.net"}
+{"in":"cloak.example 192.168.1.1","content":"cloak.example 192.168.1.1"}
+{"in":"last#","content":"last#"}
+{"in":"#","content":""}

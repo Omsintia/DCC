@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Phase 6c shared fuzz-target invariants. The SINGLE source of truth for what each byte-decoder fuzz
+    target does + asserts, referenced by BOTH:
+      - the coverage-guided discovery harness (tools/fuzz-harnesses/DnsCryptControl.SharpFuzz), and
+      - the offline crash-REPLAY theory (tests/DnsCryptControl.Fuzzing/Oracles/CrashCorpusReplayTests),
+    so the fuzzer and the regression replay can never diverge on the contract under test.
+
+    Unlike the SharpFuzz harness, this library has NO SharpFuzz/dnlib dependency and is built under the
+    strict repo-root gate (TreatWarningsAsErrors / analyzers / BannedApi). net8.0-windows so it can reach
+    the Windows helper's minisign verifier.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DnsCryptControl.Core\DnsCryptControl.Core.csproj" />
+    <ProjectReference Include="..\..\src\DnsCryptControl.Ipc\DnsCryptControl.Ipc.csproj" />
+    <ProjectReference Include="..\..\src\DnsCryptControl.Service\DnsCryptControl.Service.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,657 @@
+<UserControl x:Class="DnsCryptControl.UI.Views.ResolversView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+    xmlns:converters="clr-namespace:DnsCryptControl.UI.Converters"
+    xmlns:vm="clr-namespace:DnsCryptControl.UI.ViewModels"
+    mc:Ignorable="d"
+    d:DesignHeight="720" d:DesignWidth="1000">
+
+    <UserControl.Resources>
+        <converters:NullToVisibilityConverter x:Key="NullToVisibility" />
+        <converters:InverseBooleanConverter x:Key="InverseBool" />
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+
+        <!-- The "Test all latencies" consent dialog (P5c-U1 / vm-F1). Its Primary/Close button
+             texts are pinned UI strings — the VM automation kit anchors on them. Shown from the
+             code-behind when PendingConsentRequest becomes non-null; routed to ConfirmTestAllAsync
+             (Primary) / CancelTestAll (Close). The DialogHost is set in code-behind to the shell's
+             root ContentPresenter (no host exists at design time). -->
+        <ui:ContentDialog x:Key="TestAllConsentDialog"
+                           Title="Test resolver latencies?"
+                           PrimaryButtonText="Test latencies"
+                           CloseButtonText="Cancel"
+                           DefaultButton="Close"
+                           IsPrimaryButtonEnabled="True">
+            <StackPanel>
+                <TextBlock TextWrapping="Wrap"
+                           Text="{Binding PendingConsentRequest.TargetCount, StringFormat='This opens a direct TCP connection to up to {0} resolver endpoints to measure latency — a reachability and speed check only. A low number does NOT prove an anonymized route will resolve: a relay can be perfectly reachable yet still fail to carry your queries. To confirm a route actually works, apply it and watch the Anonymized DNS tab. Kill-switch-blocked resolvers are skipped, so fewer may actually be tested. Results are shown in-memory only and are never saved.'}" />
+            </StackPanel>
+        </ui:ContentDialog>
+
+        <!-- ODoH fix: "Add ODoH server lists" confirmation. The APP makes no network connection — the
+             helper places its own bundled, minisign-signed copies of the two lists (so the proxy loads
+             ODoH from cache immediately, never the fatal boot-time download), and the dnscrypt-proxy
+             SERVICE keeps them updated from the official source. Primary => AddOdohSourcesCommand. -->
+        <ui:ContentDialog x:Key="AddOdohSourcesDialog"
+                           Title="Add ODoH server lists?"
+                           PrimaryButtonText="Add lists"
+                           CloseButtonText="Cancel"
+                           DefaultButton="Close">
+            <StackPanel>
+                <TextBlock TextWrapping="Wrap"
+                           Text="This adds ODoH (Oblivious DoH) server lists to dnscrypt-proxy and enables ODoH. DnsCrypt Control places its own bundled, signed copies of the lists so the proxy has them right away — this app makes no network connection of its own. The dnscrypt-proxy service then keeps them up to date from the official source on its schedule, verifying each with its minisign signature." />
+                <TextBlock TextWrapping="Wrap" Margin="0,10,0,2" FontWeight="SemiBold"
+                           Text="The bundled lists come from — and the proxy refreshes them from:" />
+                <TextBlock FontFamily="Consolas" FontSize="11" TextWrapping="Wrap"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           Text="{x:Static vm:ResolversViewModel.OdohServersUrl}" />
+                <TextBlock FontFamily="Consolas" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           Text="{x:Static vm:ResolversViewModel.OdohRelaysUrl}" />
+                <TextBlock TextWrapping="Wrap" Margin="0,10,0,0" FontSize="11"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           Text="Then open Anonymized DNS and add a route pairing an ODoH server with an ODoH relay — an ODoH target only works through a relay." />
+            </StackPanel>
+        </ui:ContentDialog>
+    </UserControl.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- ======================= Banners (banners-on-top; null = hidden, NullToVisibility) -->
+        <StackPanel Grid.Row="0">
+
+            <!-- Load failure: the whole browser below is disabled via the LoadFailed trigger. -->
+            <Grid Visibility="{Binding LoadError, Converter={StaticResource NullToVisibility}}"
+                  Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <ui:InfoBar Grid.Column="0"
+                            Title="Resolver lists could not be loaded"
+                            Message="{Binding LoadError}"
+                            Severity="Error" IsOpen="True" IsClosable="False" />
+                <!-- The banner row stays ENABLED while the browser below is disabled, so the
+                     config deep-link remains reachable exactly when the fix likely lives in
+                     the Configuration tab (whole-branch review finding). -->
+                <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="8,0,0,0">
+                    <ui:Button Content="Retry"
+                               Click="ReloadButton_Click"
+                               HorizontalAlignment="Stretch" />
+                    <ui:HyperlinkButton Content="Open Configuration"
+                                        Click="OpenServerSelection_Click"
+                                        FontSize="11"
+                                        Padding="4,2"
+                                        HorizontalAlignment="Center"
+                                        Margin="0,2,0,0" />
+                </StackPanel>
+            </Grid>
+
+            <!-- Pristine zero-pool fatal state (anti-false-badge): the LOADED config yields no live server. -->
+            <ui:InfoBar Title="No live resolvers"
+                        Message="{Binding ZeroPoolWarning}"
+                        Severity="Error" IsOpen="True" IsClosable="False"
+                        Visibility="{Binding ZeroPoolWarning, Converter={StaticResource NullToVisibility}}"
+                        Margin="0,0,0,8" />
+
+            <!-- IC-9 divergence: nothing was written; staged edits stay; [Reload] is explicit. -->
+            <Grid Visibility="{Binding ConflictMessage, Converter={StaticResource NullToVisibility}}"
+                  Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <ui:InfoBar Grid.Column="0"
+                            Title="Config changed on disk"
+                            Message="{Binding ConflictMessage}"
+                            Severity="Warning" IsOpen="True" IsClosable="False" />
+                <ui:Button Grid.Column="1" Content="Reload"
+                           Appearance="Primary"
+                           Click="ReloadButton_Click"
+                           VerticalAlignment="Center" Margin="8,0,0,0" />
+            </Grid>
+
+            <ui:InfoBar Title="Helper version incompatible"
+                        Message="{Binding HelperIncompatibleMessage}"
+                        Severity="Warning" IsOpen="True" IsClosable="False"
+                        Visibility="{Binding HelperIncompatibleMessage, Converter={StaticResource NullToVisibility}}"
+                        Margin="0,0,0,8" />
+
+            <ui:InfoBar Title="Proxy rejected the new config"
+                        Message="{Binding ProxyRejectedMessage}"
+                        Severity="Error" IsOpen="True" IsClosable="False"
+                        Visibility="{Binding ProxyRejectedMessage, Converter={StaticResource NullToVisibility}}"
+                        Margin="0,0,0,8" />
+
+            <ui:InfoBar Title="Restart failed"
+                        Message="{Binding RestartFailedMessage}"
+                        Severity="Warning" IsOpen="True" IsClosable="False"
+                        Visibility="{Binding RestartFailedMessage, Converter={StaticResource NullToVisibility}}"
+                        Margin="0,0,0,8" />
+
+            <ui:InfoBar Title="Save failed"
+                        Message="{Binding SaveError}"
+                        Severity="Error" IsOpen="True" IsClosable="False"
+                        Visibility="{Binding SaveError, Converter={StaticResource NullToVisibility}}"
+                        Margin="0,0,0,8" />
+
+            <ui:InfoBar Title="Save blocked"
+                        Message="{Binding SaveBlockedReason}"
+                        Severity="Warning" IsOpen="True" IsClosable="False"
+                        Visibility="{Binding SaveBlockedReason, Converter={StaticResource NullToVisibility}}"
+                        Margin="0,0,0,8" />
+
+            <ui:InfoBar Title="Heads up"
+                        Message="{Binding ZeroPoolStagedWarning}"
+                        Severity="Warning" IsOpen="True" IsClosable="False"
+                        Visibility="{Binding ZeroPoolStagedWarning, Converter={StaticResource NullToVisibility}}"
+                        Margin="0,0,0,8" />
+
+            <ui:InfoBar Title="Single resolver"
+                        Message="{Binding SingleServerWarning}"
+                        Severity="Warning" IsOpen="True" IsClosable="False"
+                        Visibility="{Binding SingleServerWarning, Converter={StaticResource NullToVisibility}}"
+                        Margin="0,0,0,8" />
+
+            <ui:InfoBar Title="Missing pinned servers"
+                        Message="Some names in server_names are not present in any list — they will be silently ignored by the proxy."
+                        Severity="Warning" IsOpen="True" IsClosable="False"
+                        Margin="0,0,0,8">
+                <ui:InfoBar.Style>
+                    <!-- BasedOn is REQUIRED: a local Style without it discards the WPF-UI default
+                         InfoBar template, so the banner renders nothing (found live, Phase 5c VM run). -->
+                    <Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}">
+                        <Setter Property="Visibility" Value="Visible" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding MissingPinnedNames.Count}" Value="0">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </ui:InfoBar.Style>
+            </ui:InfoBar>
+
+            <ui:InfoBar Title="Pick will be ignored"
+                        Message="{Binding DisabledPickWarning}"
+                        Severity="Warning" IsOpen="True" IsClosable="False"
+                        Visibility="{Binding DisabledPickWarning, Converter={StaticResource NullToVisibility}}"
+                        Margin="0,0,0,8" />
+
+            <ui:InfoBar Title="Latency testing unavailable"
+                        Message="{Binding ProbingDisabledReason}"
+                        Severity="Informational" IsOpen="True" IsClosable="False"
+                        Visibility="{Binding ProbingDisabledReason, Converter={StaticResource NullToVisibility}}"
+                        Margin="0,0,0,8" />
+
+            <ui:InfoBar Title="Saved"
+                        Message="{Binding SaveNotice}"
+                        Severity="Success" IsOpen="True" IsClosable="False"
+                        Visibility="{Binding SaveNotice, Converter={StaticResource NullToVisibility}}"
+                        Margin="0,0,0,8" />
+
+            <!-- ODoH-behind-kill-switch: ODoH targets are hostname-based, so they need a PLAIN (unrouted)
+                 DNSCrypt server to look their names up through. This surfaces when Add-ODoH found none. -->
+            <ui:InfoBar Title="ODoH needs a plain DNSCrypt anchor"
+                        Message="{Binding BootstrapAnchorWarning}"
+                        Severity="Warning" IsOpen="True" IsClosable="False"
+                        Visibility="{Binding BootstrapAnchorWarning, Converter={StaticResource NullToVisibility}}"
+                        Margin="0,0,0,8" />
+        </StackPanel>
+
+        <!-- ======================= Browser: disabled as a whole while the load failed OR a
+             Save & apply is in flight (IsBusy). -->
+        <Grid Grid.Row="1">
+            <Grid.Style>
+                <Style TargetType="Grid">
+                    <Setter Property="IsEnabled" Value="True" />
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding LoadFailed}" Value="True">
+                            <Setter Property="IsEnabled" Value="False" />
+                        </DataTrigger>
+                        <DataTrigger Binding="{Binding IsBusy}" Value="True">
+                            <Setter Property="IsEnabled" Value="False" />
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Grid.Style>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <!-- =================== Toolbar: mode segmented, search, Test all, Update lists, Save/Revert -->
+            <Grid Grid.Row="0" Margin="0,0,0,10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <!-- Automatic / Manual segmented (server_names empty vs present). Automatic stages an
+                     empty server_names via the code-behind; Manual is display-only (the user pins via
+                     the picks). Both reflect IsManualMode one-way; the click drives the stage. -->
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                    <RadioButton x:Name="AutomaticModeToggle"
+                                 Content="Automatic (fastest)"
+                                 GroupName="ResolverMode"
+                                 IsChecked="{Binding IsManualMode, Converter={StaticResource InverseBool}, Mode=OneWay}"
+                                 Click="AutomaticMode_Click"
+                                 Margin="0,0,4,0" />
+                    <RadioButton x:Name="ManualModeToggle"
+                                 Content="Manual selection"
+                                 GroupName="ResolverMode"
+                                 IsChecked="{Binding IsManualMode, Mode=OneWay}" />
+                </StackPanel>
+
+                <ui:TextBox Grid.Column="1"
+                            Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}"
+                            PlaceholderText="Search servers…  (e.g. mullvad, quad9)"
+                            VerticalAlignment="Center" Margin="14,0,14,0" />
+
+                <ui:Button Grid.Column="2"
+                           Content="Test all latencies"
+                           Command="{Binding TestAllLatenciesCommand}"
+                           ToolTip="Measures how fast each resolver accepts a connection — a reachability/speed check only. It does NOT test whether an anonymized route resolves; a relay can be reachable yet fail to carry queries."
+                           VerticalAlignment="Center" Margin="0,0,8,0" />
+
+                <ui:Button Grid.Column="3"
+                           Content="{x:Static vm:ResolversViewModel.RevertLabel}"
+                           Command="{Binding RevertCommand}"
+                           VerticalAlignment="Center" Margin="0,0,8,0" />
+
+                <ui:Button Grid.Column="4"
+                           Content="Save &amp; apply"
+                           Appearance="Primary"
+                           Command="{Binding SaveAndApplyCommand}"
+                           VerticalAlignment="Center" />
+            </Grid>
+
+            <!-- =================== Filter chip row (5g-1: interactive LIST FILTERS). The chips are
+                 view-side facets that narrow the visible rows below — they NEVER write config
+                 (the proxy's own selection rules live in Configuration → Server selection).
+                 OR within a facet, AND across facets; property chips require EVERY stamp. -->
+            <!-- Row 1: filters on the LEFT, the four source-status rows tucked into the empty
+                 space on the RIGHT (was a full-width band below) so they cost no vertical band. -->
+            <Grid Grid.Row="1" Margin="0,0,0,10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0">
+                <WrapPanel Orientation="Horizontal" Margin="0,0,0,4">
+                    <CheckBox Content="DNSCrypt" IsChecked="{Binding FilterDnsCrypt}" AutomationProperties.AutomationId="FilterDnsCryptCheck" Margin="0,0,10,0" />
+                    <CheckBox Content="DoH" IsChecked="{Binding FilterDoh}" AutomationProperties.AutomationId="FilterDohCheck" Margin="0,0,10,0"
+                              ToolTip="Shows servers that support DoH. Most public resolvers support BOTH DoH and DNSCrypt, so this list stays large — switch the match mode below to 'only' to see servers that are DoH-only." />
+                    <CheckBox Content="ODoH" IsChecked="{Binding FilterOdoh}" AutomationProperties.AutomationId="FilterOdohCheck" Margin="0,0,10,0"
+                              ToolTip="Oblivious DoH servers. These come from a separate source list (odoh-servers) that isn't enabled by default, so your lists usually contain none — checking this may show an empty list with an explainer on how to add them." />
+                    <CheckBox Content="DNSSEC" IsChecked="{Binding FilterDnssec}" AutomationProperties.AutomationId="FilterDnssecCheck" Margin="0,0,10,0" />
+                    <CheckBox Content="No log" IsChecked="{Binding FilterNolog}" AutomationProperties.AutomationId="FilterNologCheck" Margin="0,0,10,0" />
+                    <CheckBox Content="No filter" IsChecked="{Binding FilterNofilter}" AutomationProperties.AutomationId="FilterNofilterCheck" Margin="0,0,10,0" />
+                    <CheckBox Content="IPv4" IsChecked="{Binding FilterIpv4}" AutomationProperties.AutomationId="FilterIpv4Check" Margin="0,0,10,0" />
+                    <CheckBox Content="IPv6" IsChecked="{Binding FilterIpv6}" AutomationProperties.AutomationId="FilterIpv6Check" Margin="0,0,16,0" />
+                    <CheckBox Content="Servers" IsChecked="{Binding FilterServers}" AutomationProperties.AutomationId="FilterServersCheck" Margin="0,0,10,0"
+                              ToolTip="Show only queryable servers (hide relays)." />
+                    <CheckBox Content="Relays" IsChecked="{Binding FilterRelays}" AutomationProperties.AutomationId="FilterRelaysCheck" Margin="0,0,10,0"
+                              ToolTip="Show only relays — routing infrastructure that's paired with a server in Anonymized DNS, never pooled on its own." />
+                </WrapPanel>
+                <!-- Protocol-match mode + a live count. "any" = supports the checked protocol (most servers
+                     do both DoH and DNSCrypt, so "any DoH" barely shrinks the list); "only" = exclusively
+                     that protocol (DoH-only servers). The count keeps a near-no-op filter honest, not broken.
+                     The "any" radio carries no binding — the group unchecks it when "only" (two-way) is set;
+                     ProtocolFilterExclusive defaults false, so "any" starts selected. -->
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,4" VerticalAlignment="Center">
+                    <TextBlock Text="Protocol match:" FontSize="11" VerticalAlignment="Center"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,0,6,0" />
+                    <RadioButton Content="any" GroupName="ProtoMatchMode" FontSize="11" IsChecked="True"
+                                 VerticalAlignment="Center" Margin="0,0,8,0"
+                                 ToolTip="Show servers that SUPPORT the checked protocol (they may also support others). Most resolvers support both DoH and DNSCrypt." />
+                    <RadioButton Content="only" GroupName="ProtoMatchMode" FontSize="11"
+                                 AutomationProperties.AutomationId="FilterProtocolOnlyRadio"
+                                 IsChecked="{Binding ProtocolFilterExclusive, Mode=TwoWay}"
+                                 VerticalAlignment="Center" Margin="0,0,16,0"
+                                 ToolTip="Show ONLY servers that are exclusively the checked protocol (e.g. DoH-only — hides the many that also do DNSCrypt/ODoH)." />
+                    <TextBlock Text="{Binding FilterSummary}" FontSize="11" VerticalAlignment="Center"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+                <!-- 5g-2 static hint: names the real config destination for Automatic-mode rules. -->
+                <TextBlock FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"
+                           Text="These checkboxes only filter the list below. The proxy's own selection rules for Automatic mode are in the Configuration tab under Server selection." />
+                <!-- 5g-2 deep-link: jump straight to that section (code-behind → MainWindow;
+                     the section name matches the ConfigCatalog group string exactly). -->
+                <ui:HyperlinkButton Content="Open Configuration: Server selection"
+                                    Click="OpenServerSelection_Click"
+                                    FontSize="11"
+                                    Padding="4,2"
+                                    HorizontalAlignment="Left"
+                                    Margin="0,2,0,0" />
+                </StackPanel>
+
+                <!-- The four source-status rows, moved into the empty space beside the filters (compact). -->
+                <ItemsControl Grid.Column="1" ItemsSource="{Binding Sources}" VerticalAlignment="Top" Margin="20,0,0,0">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="{x:Type vm:ResolverSourceHeader}">
+                        <!-- Compact source-status row: 11px text + tight padding so the four rows
+                             (public-resolvers / relays / odoh-servers / odoh-relays) don't eat vertical space. -->
+                        <Border BorderBrush="#22808080" BorderThickness="1" CornerRadius="5"
+                                Padding="8,2" Margin="0,0,0,2">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{Binding SourceName}" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" Margin="0,0,8,0" />
+                                <TextBlock Text="{Binding StatusText}" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,0,8,0" />
+                                <TextBlock Text="{Binding LastCheckedUtc, StringFormat='last checked {0:g} UTC'}"
+                                           FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontStyle="Italic"
+                                           Visibility="{Binding LastCheckedUtc, Converter={StaticResource NullToVisibility}}"
+                                           Margin="0,0,8,0" />
+                                <TextBlock Text="{Binding RefreshDelayHours, StringFormat='refresh every {0}h'}"
+                                           FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                           Visibility="{Binding RefreshDelayHours, Converter={StaticResource NullToVisibility}}" />
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Grid>
+
+            <!-- =================== The list (left) + detail panel (right). -->
+            <Grid Grid.Row="2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="1.7*" />
+                    <ColumnDefinition Width="1*" />
+                </Grid.ColumnDefinitions>
+
+                <!-- Virtualized resolver list. The ItemContainerStyle sets AutomationProperties.Name to
+                     the row's Name (vm-F3: the container, NOT the DataTemplate — a template-level Name
+                     doesn't rename the ListBoxItem and breaks the automation kit's fast path). -->
+                <ListBox Grid.Column="0"
+                         x:Name="ResolverList"
+                         ItemsSource="{Binding Rows}"
+                         VirtualizingPanel.IsVirtualizing="True"
+                         VirtualizingPanel.VirtualizationMode="Recycling"
+                         ScrollViewer.CanContentScroll="True"
+                         ScrollViewer.VerticalScrollBarVisibility="Auto"
+                         HorizontalContentAlignment="Stretch">
+                    <ListBox.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <VirtualizingStackPanel />
+                        </ItemsPanelTemplate>
+                    </ListBox.ItemsPanel>
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="AutomationProperties.Name" Value="{Binding Name}" />
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate DataType="{x:Type vm:ResolverRowViewModel}">
+                            <Grid Margin="0,2">
+                                <!-- Greyed out (reduced opacity) when the proxy would NOT use this entry. -->
+                                <Grid.Style>
+                                    <Style TargetType="Grid">
+                                        <Setter Property="Opacity" Value="1.0" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsIncluded}" Value="False">
+                                                <Setter Property="Opacity" Value="0.45" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Grid.Style>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="1.4*" />
+                                    <ColumnDefinition Width="1.3*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+
+                                <StackPanel Grid.Column="0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
+                                        <TextBlock Text="★" Foreground="{DynamicResource SystemFillColorCautionBrush}" Margin="4,0,0,0"
+                                                   Visibility="{Binding IsFavorite, Converter={StaticResource BoolToVisibility}}" />
+                                    </StackPanel>
+                                    <TextBlock Text="{Binding Location}" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="11" />
+                                    <TextBlock Text="{Binding ExclusionReason}" Foreground="#b42318" FontSize="10"
+                                               TextWrapping="Wrap"
+                                               Visibility="{Binding ExclusionReason, Converter={StaticResource NullToVisibility}}" />
+                                </StackPanel>
+
+                                <ItemsControl Grid.Column="1" ItemsSource="{Binding Chips}"
+                                              VerticalAlignment="Center">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <WrapPanel />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border CornerRadius="8" Padding="6,1" Margin="0,1,3,1"
+                                                    Background="{DynamicResource ControlFillColorDefaultBrush}"
+                                                    BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
+                                                <TextBlock Text="{Binding}" FontSize="9" />
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+
+                                <StackPanel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right">
+                                    <TextBlock Text="{Binding LatencyMs, StringFormat='{}{0} ms'}"
+                                               FontWeight="Bold" HorizontalAlignment="Right"
+                                               Visibility="{Binding LatencyMs, Converter={StaticResource NullToVisibility}}" />
+                                    <TextBlock Text="{Binding ProbeStatus}" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="10"
+                                               HorizontalAlignment="Right"
+                                               Visibility="{Binding ProbeStatus, Converter={StaticResource NullToVisibility}}" />
+                                </StackPanel>
+                            </Grid>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+
+                <!-- 5j: empty-state explainers, overlaying the (blank) list column. Only one shows at a
+                     time. The ODoH one is actionable (why it's empty + a deep-link to add the source);
+                     the generic one covers any other filter/search that matched nothing. -->
+                <StackPanel Grid.Column="0" VerticalAlignment="Top" Margin="4,8,4,0">
+                    <Border Visibility="{Binding ShowOdohEmptyHint, Converter={StaticResource BoolToVisibility}}"
+                            Background="{DynamicResource ControlFillColorDefaultBrush}"
+                            BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1"
+                            CornerRadius="8" Padding="12">
+                        <StackPanel>
+                            <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                       Text="No ODoH servers in your loaded lists. Oblivious DoH (ODoH) targets come from a separate source list (odoh-servers) that isn't set up by default. ODoH also needs a relay — an ODoH target can ONLY be used through an ODoH relay, so both the odoh-servers and odoh-relays lists are required, plus a route pairing them (set up in Anonymized DNS). Click 'Add ODoH server lists' below: DnsCrypt Control places its own bundled, signed copies (this app makes no network connection), and the dnscrypt-proxy service then keeps them updated and minisign-verified." />
+                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                <ui:Button Content="Add ODoH server lists"
+                                           Appearance="Primary"
+                                           Click="AddOdohSources_Click"
+                                           IsEnabled="{Binding CanAddOdohSources}"
+                                           ToolTipService.ShowOnDisabled="True"
+                                           ToolTip="Adds the odoh-servers and odoh-relays sources and enables ODoH. DnsCrypt Control places its bundled, signed copies of the lists (this app makes no network connection); the proxy keeps them updated and minisign-verified. (Save or revert any pending changes first.)"
+                                           Margin="0,0,10,0" />
+                                <ui:HyperlinkButton Content="Or add them manually in Configuration ▸ Sources"
+                                                    Click="OpenSources_Click"
+                                                    FontSize="11" Padding="4,2"
+                                                    VerticalAlignment="Center" />
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+                    <TextBlock Visibility="{Binding ShowNoMatchHint, Converter={StaticResource BoolToVisibility}}"
+                               TextWrapping="Wrap" FontStyle="Italic" Margin="4,0,0,0"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               Text="No servers match your current filters or search." />
+                </StackPanel>
+
+                <!-- Detail panel: protocol/props/address/source/description/stamp + the two U2 picks. -->
+                <Border Grid.Column="1" BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8"
+                        Padding="12" Margin="10,0,0,0"
+                        DataContext="{Binding SelectedItem, ElementName=ResolverList}">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <StackPanel>
+                            <!-- Placeholder shows only when nothing is selected (DataContext is null). -->
+                            <TextBlock Text="Select a resolver to see details."
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontStyle="Italic">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding}" Value="{x:Null}">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+
+                            <StackPanel Visibility="{Binding Converter={StaticResource NullToVisibility}}">
+                                <TextBlock Text="{Binding Name}" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" Margin="0,0,0,8" />
+
+                                <Grid Margin="0,2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="Source list" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                    <TextBlock Grid.Column="1" Text="{Binding SourceName}" HorizontalAlignment="Right" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                </Grid>
+
+                                <Grid Margin="0,2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="Location" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                    <TextBlock Grid.Column="1" Text="{Binding Location}" HorizontalAlignment="Right" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                </Grid>
+
+                                <Grid Margin="0,2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="Protocol" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                    <TextBlock Grid.Column="1" Text="{Binding SelectedStamp.Protocol}" HorizontalAlignment="Right" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                </Grid>
+
+                                <Grid Margin="0,2"
+                                      Visibility="{Binding SelectedStamp.AddressIp, Converter={StaticResource NullToVisibility}}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="Address" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                    <TextBlock Grid.Column="1" HorizontalAlignment="Right" Foreground="{DynamicResource TextFillColorPrimaryBrush}">
+                                        <Run Text="{Binding SelectedStamp.AddressIp, Mode=OneWay}" />
+                                        <Run Text=":" />
+                                        <Run Text="{Binding SelectedStamp.Port, Mode=OneWay}" />
+                                    </TextBlock>
+                                </Grid>
+
+                                <ItemsControl ItemsSource="{Binding Chips}" Margin="0,6,0,0">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <WrapPanel />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border CornerRadius="8" Padding="6,1" Margin="0,1,3,1"
+                                                    Background="{DynamicResource ControlFillColorDefaultBrush}"
+                                                    BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
+                                                <TextBlock Text="{Binding}" FontSize="10" />
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+
+                                <TextBlock Text="{Binding Description}" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                           TextWrapping="Wrap" Margin="0,8,0,2" />
+
+                                <!-- 5g-5: EVERY stamp, one line each (was: a static label of stamps[0]'s
+                                     protocol). Theme-safe brushes ONLY (5f lesson — never hard-coded
+                                     light hex). No inner ScrollViewer: a nested viewer swallows the
+                                     mouse wheel even when it can't scroll (dead-zones the pane); the
+                                     pane's outer ScrollViewer handles long stamp lists.
+                                     Labelled header + caption: without them the decoded lines read as
+                                     a random address list, not as THE stamps the row chip counted
+                                     (user feedback, post-5g). -->
+                                <Border CornerRadius="5" Padding="6" Margin="0,6,0,0"
+                                        Background="{DynamicResource ControlFillColorDefaultBrush}"
+                                        BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}"
+                                        BorderThickness="1"
+                                        Visibility="{Binding SelectedStamp, Converter={StaticResource NullToVisibility}}">
+                                    <StackPanel>
+                                        <TextBlock FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" Margin="0,0,0,2">
+                                            <Run Text="Stamps:" />
+                                            <Run Text="{Binding Stamps.Count, Mode=OneWay}" />
+                                        </TextBlock>
+                                        <TextBlock FontSize="10" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Margin="0,0,0,4"
+                                                   Text="Each line below is one stamp — a complete connection recipe (protocol, address and identity details) for reaching this server. When a server lists several, the proxy uses one of them, picked when it starts. The Protocol and Address shown above are just the first stamp's summary." />
+                                        <ItemsControl ItemsSource="{Binding Stamps}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate DataType="{x:Type vm:StampDisplay}">
+                                                    <TextBlock TextWrapping="Wrap" Margin="0,1" Foreground="{DynamicResource TextFillColorPrimaryBrush}">
+                                                        <Run Text="{Binding Protocol, Mode=OneWay}" FontWeight="SemiBold" FontSize="10" />
+                                                        <Run Text="{Binding Endpoint, Mode=OneWay}" FontFamily="Consolas" FontSize="10" />
+                                                        <Run Text="{Binding Provider, Mode=OneWay}" FontFamily="Consolas" FontSize="10" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                                    </TextBlock>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </StackPanel>
+                                </Border>
+
+                                <StackPanel Margin="0,10,0,0">
+                                    <!-- Server actions: the pool is server_names — only a QUERYABLE server, never a relay. -->
+                                    <StackPanel Orientation="Horizontal"
+                                                Visibility="{Binding IsServer, Converter={StaticResource BoolToVisibility}}">
+                                        <ui:Button Content="Use only this server"
+                                                   Appearance="Primary"
+                                                   Click="UseOnlyThisServer_Click"
+                                                   Margin="0,0,8,0" />
+                                        <ui:Button Content="Add to pool"
+                                                   Click="AddToPool_Click"
+                                                   Margin="0,0,8,0" />
+                                        <ui:Button Content="Test latency"
+                                                   ToolTip="Measures connection speed/reachability only — not whether this server actually resolves through a route."
+                                                   Click="ProbeRow_Click" />
+                                    </StackPanel>
+
+                                    <!-- Anonymize shortcut: only for a server a relay can carry (DNSCrypt / ODoH target; DoH can't be relayed). -->
+                                    <ui:Button Content="Route through a relay (Anonymized DNS)"
+                                               Margin="0,8,0,0"
+                                               Click="RouteThroughRelay_Click"
+                                               ToolTip="Opens Anonymized DNS with a route started for this server — pick a relay to hide your address from the server, then Save."
+                                               Visibility="{Binding IsAnonymizableServer, Converter={StaticResource BoolToVisibility}}" />
+
+                                    <!-- Relay guidance: a relay is NOT a pool server; it's paired with a server in Anonymized DNS. -->
+                                    <StackPanel Visibility="{Binding IsRelay, Converter={StaticResource BoolToVisibility}}">
+                                        <Border CornerRadius="8" Padding="12"
+                                                Background="{DynamicResource ControlFillColorDefaultBrush}"
+                                                BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
+                                            <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                       Text="This is a relay — routing infrastructure, not a server you query. Relays aren't added to the pool; they're paired with a server in Anonymized DNS to hide your address from that server." />
+                                        </Border>
+                                        <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                            <ui:Button Content="Open Anonymized DNS route builder"
+                                                       Appearance="Primary"
+                                                       Click="OpenAnonDnsBuilder_Click"
+                                                       Margin="0,0,8,0" />
+                                            <ui:Button Content="Test latency"
+                                                       ToolTip="A relay accepting a connection quickly does NOT mean it will carry your queries — some reachable relays silently fail to relay. Confirm by applying the route and watching the Anonymized DNS tab."
+                                                       Click="ProbeRow_Click" />
+                                        </StackPanel>
+                                    </StackPanel>
+                                </StackPanel>
+                            </StackPanel>
+                        </StackPanel>
+                    </ScrollViewer>
+                </Border>
+            </Grid>
+        </Grid>
+    </Grid>
+</UserControl>

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "isRoot": true,
+  "tools": {
+    "sharpfuzz.commandline": {
+      "version": "2.3.0",
+      "commands": [
+        "sharpfuzz"
+      ],
+      "rollForward": false
+    },
+    "wix": {
+      "version": "5.0.2",
+      "commands": [
+        "wix"
+      ],
+      "rollForward": false
+    }
+  }
+}

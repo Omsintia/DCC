@@ -1,0 +1,66 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <!-- Phase 5f: WPF-UI 4.x dropped its NotifyIcon, so the tray icon uses the WinForms one. This flag
+         enables System.Windows.Forms + System.Drawing on this UI project only (both are in-platform for
+         net8.0-windows, so no CA1416). No WinForms message loop is used — the WPF pump drives the icon. -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <!-- Branded shield/DCC icon: the exe icon (Explorer, taskbar fallback, tray via
+         ExtractAssociatedIcon) AND a WPF Resource for Window.Icon (taskbar / alt-tab). -->
+    <ApplicationIcon>Assets\DnsCryptControl.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\DnsCryptControl.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- F21 bundled offline snapshot: links the SAME committed, minisign-signed list the helper embeds
+         (single source of truth) as loose content under resolver-snapshot\, so the Resolvers tab has
+         data on a fresh install before the proxy ever writes a cache. ResolverListReader falls back to
+         this dir when %ProgramData% has no cache yet and labels the rows "bundled snapshot". -->
+    <Content Include="..\DnsCryptControl.Service\Assets\default-lists\public-resolvers.md"
+             Link="resolver-snapshot\public-resolvers.md"
+             CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\DnsCryptControl.Service\Assets\default-lists\relays.md"
+             Link="resolver-snapshot\relays.md"
+             CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- UseWindowsForms adds implicit global usings (System.Windows.Forms, System.Drawing) that collide with
+       WPF short names (Application/ComboBox/UserControl). The tray NotifyIcon is the only WinForms use and
+       is referenced fully-qualified, so drop those global usings to keep the WPF names unambiguous. -->
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WPF-UI" Version="4.3.0" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DnsCryptControl.Ipc\DnsCryptControl.Ipc.csproj" />
+    <ProjectReference Include="..\DnsCryptControl.Core\DnsCryptControl.Core.csproj" />
+    <ProjectReference Include="..\DnsCryptControl.Platform\DnsCryptControl.Platform.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 6d: lets the UI tests await the internal ConfigurationViewModel.PendingValidation seam so the
+         debounced-validation tests observe a run deterministically instead of racing a wall-clock post. -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>DnsCryptControl.UI.Tests</_Parameter1>
+    </AssemblyAttribute>
+    <!-- 6d perf arm: the debounce stress soak awaits the same PendingValidation seam. -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>DnsCryptControl.Benchmarks</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>

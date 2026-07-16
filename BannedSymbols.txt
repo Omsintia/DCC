@@ -1,0 +1,12 @@
+T:System.Runtime.Serialization.Formatters.Binary.BinaryFormatter;BinaryFormatter is an RCE deserialization vector (CWE-502). Use System.Text.Json source-gen.
+T:System.Web.Script.Serialization.JavaScriptSerializer;Insecure serializer; use System.Text.Json.
+M:System.Diagnostics.Process.Start(System.String);Use ProcessStartInfo with ArgumentList and UseShellExecute=false (CWE-78).
+T:System.Net.Sockets.Socket;Raw sockets bypass the offline/probe choke point (Phase 5 F12/IC-11). The ONLY sanctioned use is UI TcpConnectProber.cs (pragma RS0030).
+T:System.Net.Sockets.TcpClient;Raw sockets bypass the offline/probe choke point (F12/IC-11). Sanctioned only in UI TcpConnectProber.cs (pragma RS0030).
+T:System.Net.Sockets.UdpClient;Raw sockets bypass the offline/probe choke point (F12/IC-11). Sanctioned only in Service LoopbackResolveProbe.cs (pragma RS0030).
+T:System.Net.NetworkInformation.Ping;ICMP bypasses the probe choke point and validates no service port (F12/IC-11).
+T:System.Net.Dns;Hostname resolution is egress outside the consented probe; probe targets are IP literals only (IC-15).
+T:System.Net.Http.HttpClient;All outbound HTTP must route through the single INetworkGate choke point (F12); no other HttpClient construction.
+T:System.Net.WebClient;Offline by design (Phase 5f) — no outbound HTTP compiles into the app; deferred egress belongs to Phase 6 behind INetworkGate.
+T:System.Net.Http.SocketsHttpHandler;Offline by design (Phase 5f) — no HTTP handler compiles in; any future egress routes through the single Phase-6 choke point.
+T:System.Net.WebRequest;Offline by design (Phase 5f) — legacy WebRequest is another egress path; the app makes no outbound network calls of its own.

@@ -1,0 +1,174 @@
+<UserControl x:Class="DnsCryptControl.UI.Views.SettingsView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+    mc:Ignorable="d"
+    d:DesignHeight="720" d:DesignWidth="1000">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="16">
+        <StackPanel>
+
+            <!-- APPEARANCE -->
+            <TextBlock Text="APPEARANCE" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,0,0,8" />
+            <ui:Card Margin="0,0,0,16">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                        <TextBlock Text="Theme" FontWeight="SemiBold" />
+                        <TextBlock Text="Follows your Windows theme by default. Applies instantly."
+                                   FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Margin="0,2,0,0" />
+                    </StackPanel>
+                    <ComboBox Grid.Column="1" Width="150" VerticalAlignment="Center"
+                              SelectedValuePath="Content"
+                              SelectedValue="{Binding SelectedTheme, Mode=TwoWay}">
+                        <ComboBoxItem Content="System" />
+                        <ComboBoxItem Content="Light" />
+                        <ComboBoxItem Content="Dark" />
+                    </ComboBox>
+                </Grid>
+            </ui:Card>
+
+            <!-- STARTUP & BEHAVIOUR -->
+            <TextBlock Text="STARTUP &amp; BEHAVIOUR" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,0,0,8" />
+            <ui:Card Margin="0,0,0,16">
+                <StackPanel>
+                    <Grid Margin="0,0,0,10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                            <TextBlock Text="Start DnsCrypt Control with Windows" FontWeight="SemiBold" />
+                            <TextBlock Text="A per-user startup entry. Never elevates; opening the app never changes your DNS."
+                                       FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Margin="0,2,0,0" />
+                        </StackPanel>
+                        <ui:ToggleSwitch Grid.Column="1" VerticalAlignment="Center"
+                                         IsChecked="{Binding StartWithWindows, Mode=TwoWay}" />
+                    </Grid>
+                    <Grid Margin="0,0,0,10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                            <TextBlock Text="Start minimised to the notification area" FontWeight="SemiBold" />
+                            <TextBlock Text="Starts hidden in the tray (next to the clock) instead of opening a window."
+                                       FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Margin="0,2,0,0" />
+                        </StackPanel>
+                        <ui:ToggleSwitch Grid.Column="1" VerticalAlignment="Center"
+                                         IsChecked="{Binding StartMinimized, Mode=TwoWay}" />
+                    </Grid>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                            <TextBlock Text="Keep running in the tray when I close the window" FontWeight="SemiBold" />
+                            <TextBlock Text="Closing hides to the tray so status polling continues. Use Quit in the tray menu to exit."
+                                       FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Margin="0,2,0,0" />
+                        </StackPanel>
+                        <ui:ToggleSwitch Grid.Column="1" VerticalAlignment="Center"
+                                         IsChecked="{Binding MinimizeToTrayOnClose, Mode=TwoWay}" />
+                    </Grid>
+                </StackPanel>
+            </ui:Card>
+
+            <!-- BINARY INTEGRITY -->
+            <TextBlock Text="BINARY INTEGRITY" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,0,0,8" />
+            <ui:Card Margin="0,0,0,16">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0">
+                            <TextBlock Text="Installed dnscrypt-proxy" FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding ProxyExeDisplayPath}" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                       TextWrapping="Wrap" Margin="0,2,0,0" />
+                        </StackPanel>
+                        <ui:Button Grid.Column="1" Content="Re-hash now" VerticalAlignment="Top"
+                                   Command="{Binding RefreshIntegrityCommand}" />
+                    </Grid>
+                    <Grid Margin="0,10,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="Version" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Width="70" />
+                        <TextBlock Grid.Column="1" Text="{Binding ProxyVersion, TargetNullValue='—'}" />
+                    </Grid>
+                    <Grid Margin="0,4,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="SHA-256" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Width="70" />
+                        <TextBox Grid.Column="1" Text="{Binding ProxySha256, Mode=OneWay}" IsReadOnly="True"
+                                 FontFamily="Consolas" BorderThickness="0" Background="Transparent"
+                                 TextWrapping="Wrap" />
+                    </Grid>
+                    <ui:InfoBar Title="Integrity" Message="{Binding IntegrityVerdict}"
+                                Severity="Informational" IsOpen="True" IsClosable="False" Margin="0,10,0,0" />
+                    <TextBlock Text="This app never downloads updates — install new releases via the signed installer."
+                               FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Margin="0,8,0,0" />
+                </StackPanel>
+            </ui:Card>
+
+            <!-- PRIVACY & NETWORK -->
+            <TextBlock Text="PRIVACY &amp; NETWORK" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,0,0,8" />
+            <ui:InfoBar Title="Offline by design"
+                        Message="DnsCrypt Control makes no outbound network connections of its own — no update checks, no telemetry. This is enforced at build time: no HTTP client is compiled into the app."
+                        Severity="Success" IsOpen="True" IsClosable="False" Margin="0,0,0,16" />
+
+            <!-- RESET -->
+            <TextBlock Text="RESET" FontSize="11" FontWeight="SemiBold" Foreground="#B42318" Margin="0,0,0,8" />
+            <ui:Card Margin="0,0,0,10">
+                <StackPanel>
+                    <TextBlock Text="Reset to unprotected" FontWeight="SemiBold" />
+                    <TextBlock Text="Turns protection off and restores your normal DNS (in the safe fail-closed order). The proxy stays installed, so you can re-enable in one click."
+                               FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Margin="0,2,0,10" />
+                    <ui:Button Content="Reset to unprotected" HorizontalAlignment="Left"
+                               Command="{Binding SoftResetCommand}" />
+                </StackPanel>
+            </ui:Card>
+            <ui:Card Margin="0,0,0,10">
+                <StackPanel>
+                    <TextBlock Text="Remove proxy service" FontWeight="SemiBold" Foreground="#B42318" />
+                    <TextBlock Text="Resets to unprotected, then uninstalls the dnscrypt-proxy service completely. Re-enabling later requires reinstalling. Type REMOVE to confirm."
+                               FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Margin="0,2,0,10" />
+                    <StackPanel Orientation="Horizontal">
+                        <ui:TextBox Width="140" PlaceholderText="Type REMOVE"
+                                    Text="{Binding RemoveConfirmText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                    VerticalAlignment="Center" Margin="0,0,8,0" />
+                        <ui:Button Content="Remove proxy service" Appearance="Danger"
+                                   Command="{Binding RemoveProxyCommand}" />
+                    </StackPanel>
+                </StackPanel>
+            </ui:Card>
+            <ui:InfoBar Title="Result" Message="{Binding ResetStatus}"
+                        Severity="Informational" IsClosable="False" Margin="0,0,0,16"
+                        IsOpen="{Binding HasResetStatus}" />
+
+            <!-- ABOUT -->
+            <TextBlock Text="ABOUT" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,0,0,8" />
+            <ui:Card>
+                <StackPanel>
+                    <TextBlock>
+                        <Run Text="DnsCrypt Control" FontWeight="SemiBold" />
+                        <Run Text="  ·  dnscrypt-proxy " /><Run Text="{Binding ProxyVersion, TargetNullValue='—'}" />
+                    </TextBlock>
+                    <TextBlock Text="Local, offline, split-privilege. No network access from this app."
+                               FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,4,0,0" />
+                </StackPanel>
+            </ui:Card>
+
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

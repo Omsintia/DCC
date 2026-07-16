@@ -1,0 +1,4 @@
+# Bundled ODoH source-list caches: byte-exact, minisign-signed. Never let git
+# rewrite their bytes (line endings / BOM) — that breaks the detached signature.
+*.md binary
+*.minisig binary

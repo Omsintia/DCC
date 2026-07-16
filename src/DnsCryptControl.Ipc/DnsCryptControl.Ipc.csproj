@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\DnsCryptControl.Core\DnsCryptControl.Core.csproj" />
+    <ProjectReference Include="..\DnsCryptControl.Platform\DnsCryptControl.Platform.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.IO.Pipes.AccessControl" Version="5.0.0" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
+    <!-- Required by the source generator for PipeServerOwner's GetSecurityInfo/LocalFree
+         LibraryImport P/Invokes (multiple out/pointer-shaped params); precedent:
+         DnsCryptControl.Service.csproj sets this for its own LibraryImport P/Invokes. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>DnsCryptControl.Ipc.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,642 @@
+<UserControl x:Class="DnsCryptControl.UI.Views.FilteringView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+    xmlns:converters="clr-namespace:DnsCryptControl.UI.Converters"
+    xmlns:vm="clr-namespace:DnsCryptControl.UI.ViewModels"
+    mc:Ignorable="d"
+    d:DesignHeight="720" d:DesignWidth="1000">
+
+    <UserControl.Resources>
+        <converters:NullToVisibilityConverter x:Key="NullToVisibility" />
+        <converters:InverseBooleanConverter x:Key="InverseBool" />
+        <converters:InverseBoolToVisibilityConverter x:Key="InverseBoolToVisibility" />
+        <converters:FamilyMapLookupConverter x:Key="FamilyMap" />
+        <converters:FamilyMapToVisibilityConverter x:Key="FamilyMapVis" />
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+
+        <Style x:Key="FamilySectionBorder" TargetType="Border">
+            <Setter Property="BorderBrush" Value="#22808080" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="Padding" Value="12" />
+            <Setter Property="Margin" Value="0,0,0,12" />
+        </Style>
+
+        <!-- A per-line row in a family's structured list: line number, a lint marker (⛔ Error /
+             ⚠ Warning) whose tooltip carries the finding messages (IC-10), and the canonical text.
+             Marker glyph/colour derive from WorstSeverity, so a clean line shows nothing. -->
+        <DataTemplate x:Key="RuleRowTemplate" DataType="{x:Type vm:RuleRowViewModel}">
+            <Grid Margin="0,1">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="34" />
+                    <ColumnDefinition Width="20" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Column="0" Text="{Binding LineNumber}"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontFamily="Consolas" FontSize="11"
+                           HorizontalAlignment="Right" Margin="0,0,8,0" VerticalAlignment="Center" />
+
+                <TextBlock Grid.Column="1" VerticalAlignment="Center"
+                           ToolTipService.ShowDuration="20000">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                            <Setter Property="FontWeight" Value="Bold" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding WorstSeverity}" Value="Error">
+                                    <Setter Property="Visibility" Value="Visible" />
+                                    <Setter Property="Text" Value="⛔" />
+                                    <Setter Property="Foreground" Value="#b42318" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding WorstSeverity}" Value="Warning">
+                                    <Setter Property="Visibility" Value="Visible" />
+                                    <Setter Property="Text" Value="⚠" />
+                                    <Setter Property="Foreground" Value="#b25e09" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                    <TextBlock.ToolTip>
+                        <ItemsControl ItemsSource="{Binding Findings}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Message}" TextWrapping="Wrap" MaxWidth="360" />
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </TextBlock.ToolTip>
+                </TextBlock>
+
+                <TextBlock Grid.Column="2" Text="{Binding Text}"
+                           FontFamily="Consolas" FontSize="12" VerticalAlignment="Center"
+                           TextWrapping="Wrap">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <!-- Base foreground: a normal rule line is primary text (theme-adaptive). The
+                                 triggers below override it for comment/error lines. Without this a plain
+                                 line inherited the framework default (black) — invisible in dark mode. -->
+                            <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding Kind}" Value="Comment">
+                                    <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
+                                    <Setter Property="FontStyle" Value="Italic" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding WorstSeverity}" Value="Error">
+                                    <Setter Property="Foreground" Value="#b42318" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+            </Grid>
+        </DataTemplate>
+
+        <!-- The family editor BODY (list ⇄ raw): DataContext = a RuleFamilyEditorViewModel. No family
+             key needed here — the raw .txt is the truth (IC-1b) and every keystroke drives the VM's
+             debounced re-parse/lint. The list view is display-only while structured editing is
+             disabled (a FATAL lint / nothing loaded, IC-11). -->
+        <DataTemplate x:Key="FamilyEditorBodyTemplate" DataType="{x:Type vm:RuleFamilyEditorViewModel}">
+            <StackPanel>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,4">
+                    <RadioButton Content="List"
+                                 GroupName="{Binding Kind}"
+                                 IsChecked="True"
+                                 VerticalAlignment="Center" Margin="0,0,4,0" />
+                    <RadioButton x:Name="FamilyRawToggle"
+                                 Content="Raw text"
+                                 GroupName="{Binding Kind}"
+                                 VerticalAlignment="Center" />
+                </StackPanel>
+
+                <Border BorderBrush="#22808080" BorderThickness="1" CornerRadius="6"
+                        MinHeight="80" MaxHeight="240"
+                        Visibility="{Binding IsChecked, ElementName=FamilyRawToggle, Converter={StaticResource InverseBoolToVisibility}}"
+                        IsEnabled="{Binding IsStructuredEditable}">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="8">
+                        <ItemsControl ItemsSource="{Binding Rows}"
+                                      ItemTemplate="{StaticResource RuleRowTemplate}"
+                                      VirtualizingPanel.IsVirtualizing="True">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <VirtualizingStackPanel />
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </Border>
+
+                <TextBox x:Name="FamilyRawEditor"
+                         Text="{Binding RawText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         Visibility="{Binding IsChecked, ElementName=FamilyRawToggle, Converter={StaticResource BoolToVisibility}}"
+                         AcceptsReturn="True" AcceptsTab="False"
+                         FontFamily="Consolas" FontSize="12"
+                         Background="#1e1e2e" Foreground="#cdd6f4" CaretBrush="#cdd6f4"
+                         BorderThickness="0" Padding="10"
+                         MinHeight="80" MaxHeight="240"
+                         TextWrapping="NoWrap"
+                         VerticalScrollBarVisibility="Auto"
+                         HorizontalScrollBarVisibility="Auto"
+                         SpellCheck.IsEnabled="False" />
+            </StackPanel>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- ======================= Top banners (config-write save path + load; null = hidden). -->
+        <StackPanel Grid.Row="0">
+            <Grid Visibility="{Binding LoadError, Converter={StaticResource NullToVisibility}}"
+                  Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <ui:InfoBar Grid.Column="0"
+                            Title="Filtering settings could not be loaded"
+                            Message="{Binding LoadError}"
+                            Severity="Error" IsOpen="True" IsClosable="False" />
+                <ui:Button Grid.Column="1" Content="Retry"
+                           Click="ReloadButton_Click"
+                           VerticalAlignment="Center" Margin="8,0,0,0" />
+            </Grid>
+
+            <!-- IC-9 divergence: the config-key write aborted; staged edits stay; [Reload] is explicit. -->
+            <Grid Visibility="{Binding ConflictMessage, Converter={StaticResource NullToVisibility}}"
+                  Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <ui:InfoBar Grid.Column="0"
+                            Title="Config changed on disk"
+                            Message="{Binding ConflictMessage}"
+                            Severity="Warning" IsOpen="True" IsClosable="False" />
+                <ui:Button Grid.Column="1" Content="Reload"
+                           Appearance="Primary"
+                           Click="ReloadButton_Click"
+                           VerticalAlignment="Center" Margin="8,0,0,0" />
+            </Grid>
+
+            <ui:InfoBar Title="Save failed"
+                        Message="{Binding SaveError}"
+                        Severity="Error" IsOpen="True" IsClosable="False"
+                        Visibility="{Binding SaveError, Converter={StaticResource NullToVisibility}}"
+                        Margin="0,0,0,8" />
+
+            <ui:InfoBar Title="Saved"
+                        Message="{Binding SaveNotice}"
+                        Severity="Success" IsOpen="True" IsClosable="False"
+                        Visibility="{Binding SaveNotice, Converter={StaticResource NullToVisibility}}"
+                        Margin="0,0,0,8" />
+        </StackPanel>
+
+        <!-- ======================= Content: disabled while the load failed or a save is in flight. -->
+        <Grid Grid.Row="1">
+            <Grid.Style>
+                <Style TargetType="Grid">
+                    <Setter Property="IsEnabled" Value="True" />
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding LoadFailed}" Value="True">
+                            <Setter Property="IsEnabled" Value="False" />
+                        </DataTrigger>
+                        <DataTrigger Binding="{Binding IsBusy}" Value="True">
+                            <Setter Property="IsEnabled" Value="False" />
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Grid.Style>
+
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <StackPanel>
+                    <!-- Content-derived headline (IC-16): "K of 6 families active". -->
+                    <ui:InfoBar Title="Filtering"
+                                Message="{Binding ActiveFamiliesHeadline}"
+                                Severity="Informational" IsOpen="True" IsClosable="False"
+                                Margin="0,0,0,12" />
+
+                    <!-- ============================================ BLOCKED NAMES -->
+                    <Border Style="{StaticResource FamilySectionBorder}">
+                        <StackPanel>
+                            <Grid Margin="0,0,0,6">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                    <TextBlock Text="Blocked names" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="{Binding Editors[0].Summary}" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,1,0,0" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <ui:Button Content="Enable &amp; wire" Tag="BlockedNames" Click="EnableFamily_Click" Margin="0,0,6,0" />
+                                    <ui:Button Content="Revert" Click="FamilyRevert_Click"
+                                               IsEnabled="{Binding Editors[0].IsDirty}" Margin="0,0,6,0" />
+                                    <ui:Button Content="Save" Appearance="Primary" Tag="BlockedNames" Click="FamilySave_Click"
+                                               IsEnabled="{Binding Editors[0].IsDirty}" />
+                                </StackPanel>
+                            </Grid>
+                            <ui:InfoBar Title="Managed externally" Severity="Warning" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding ExternalPathBanners, Converter={StaticResource FamilyMap}, ConverterParameter=BlockedNames}"
+                                        Visibility="{Binding ExternalPathBanners, Converter={StaticResource FamilyMapVis}, ConverterParameter=BlockedNames}">
+                                <ui:InfoBar.Style>
+                                    <Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" />
+                                </ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Enabled, but empty" Severity="Warning" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding EmptyButWiredBanners, Converter={StaticResource FamilyMap}, ConverterParameter=BlockedNames}"
+                                        Visibility="{Binding EmptyButWiredBanners, Converter={StaticResource FamilyMapVis}, ConverterParameter=BlockedNames}">
+                                <ui:InfoBar.Style>
+                                    <Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" />
+                                </ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Changed on disk" Severity="Warning" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding StalenessWarnings, Converter={StaticResource FamilyMap}, ConverterParameter=BlockedNames}"
+                                        Visibility="{Binding StalenessWarnings, Converter={StaticResource FamilyMapVis}, ConverterParameter=BlockedNames}">
+                                <ui:InfoBar.Style>
+                                    <Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" />
+                                </ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Could not save" Severity="Error" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding FamilyErrors, Converter={StaticResource FamilyMap}, ConverterParameter=BlockedNames}"
+                                        Visibility="{Binding FamilyErrors, Converter={StaticResource FamilyMapVis}, ConverterParameter=BlockedNames}">
+                                <ui:InfoBar.Style>
+                                    <Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" />
+                                </ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Saved" Severity="Success" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding FamilyNotices, Converter={StaticResource FamilyMap}, ConverterParameter=BlockedNames}"
+                                        Visibility="{Binding FamilyNotices, Converter={StaticResource FamilyMapVis}, ConverterParameter=BlockedNames}">
+                                <ui:InfoBar.Style>
+                                    <Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" />
+                                </ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ContentControl Content="{Binding Editors[0]}" ContentTemplate="{StaticResource FamilyEditorBodyTemplate}" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- ============================================ ALLOWED NAMES -->
+                    <Border Style="{StaticResource FamilySectionBorder}">
+                        <StackPanel>
+                            <Grid Margin="0,0,0,6">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                    <TextBlock Text="Allowed names" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="{Binding Editors[1].Summary}" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,1,0,0" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <ui:Button Content="Enable &amp; wire" Tag="AllowedNames" Click="EnableFamily_Click" Margin="0,0,6,0" />
+                                    <ui:Button Content="Revert" Click="FamilyRevert_Click"
+                                               IsEnabled="{Binding Editors[1].IsDirty}" Margin="0,0,6,0" />
+                                    <ui:Button Content="Save" Appearance="Primary" Tag="AllowedNames" Click="FamilySave_Click"
+                                               IsEnabled="{Binding Editors[1].IsDirty}" />
+                                </StackPanel>
+                            </Grid>
+                            <ui:InfoBar Title="Managed externally" Severity="Warning" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding ExternalPathBanners, Converter={StaticResource FamilyMap}, ConverterParameter=AllowedNames}"
+                                        Visibility="{Binding ExternalPathBanners, Converter={StaticResource FamilyMapVis}, ConverterParameter=AllowedNames}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Enabled, but empty" Severity="Warning" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding EmptyButWiredBanners, Converter={StaticResource FamilyMap}, ConverterParameter=AllowedNames}"
+                                        Visibility="{Binding EmptyButWiredBanners, Converter={StaticResource FamilyMapVis}, ConverterParameter=AllowedNames}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Changed on disk" Severity="Warning" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding StalenessWarnings, Converter={StaticResource FamilyMap}, ConverterParameter=AllowedNames}"
+                                        Visibility="{Binding StalenessWarnings, Converter={StaticResource FamilyMapVis}, ConverterParameter=AllowedNames}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Could not save" Severity="Error" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding FamilyErrors, Converter={StaticResource FamilyMap}, ConverterParameter=AllowedNames}"
+                                        Visibility="{Binding FamilyErrors, Converter={StaticResource FamilyMapVis}, ConverterParameter=AllowedNames}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Saved" Severity="Success" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding FamilyNotices, Converter={StaticResource FamilyMap}, ConverterParameter=AllowedNames}"
+                                        Visibility="{Binding FamilyNotices, Converter={StaticResource FamilyMapVis}, ConverterParameter=AllowedNames}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ContentControl Content="{Binding Editors[1]}" ContentTemplate="{StaticResource FamilyEditorBodyTemplate}" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- ============================================ BLOCKED IPS -->
+                    <Border Style="{StaticResource FamilySectionBorder}">
+                        <StackPanel>
+                            <Grid Margin="0,0,0,6">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                    <TextBlock Text="Blocked IPs" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="{Binding Editors[2].Summary}" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,1,0,0" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <ui:Button Content="Enable &amp; wire" Tag="BlockedIps" Click="EnableFamily_Click" Margin="0,0,6,0" />
+                                    <ui:Button Content="Revert" Click="FamilyRevert_Click"
+                                               IsEnabled="{Binding Editors[2].IsDirty}" Margin="0,0,6,0" />
+                                    <ui:Button Content="Save" Appearance="Primary" Tag="BlockedIps" Click="FamilySave_Click"
+                                               IsEnabled="{Binding Editors[2].IsDirty}" />
+                                </StackPanel>
+                            </Grid>
+                            <ui:InfoBar Title="Managed externally" Severity="Warning" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding ExternalPathBanners, Converter={StaticResource FamilyMap}, ConverterParameter=BlockedIps}"
+                                        Visibility="{Binding ExternalPathBanners, Converter={StaticResource FamilyMapVis}, ConverterParameter=BlockedIps}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Enabled, but empty" Severity="Warning" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding EmptyButWiredBanners, Converter={StaticResource FamilyMap}, ConverterParameter=BlockedIps}"
+                                        Visibility="{Binding EmptyButWiredBanners, Converter={StaticResource FamilyMapVis}, ConverterParameter=BlockedIps}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Changed on disk" Severity="Warning" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding StalenessWarnings, Converter={StaticResource FamilyMap}, ConverterParameter=BlockedIps}"
+                                        Visibility="{Binding StalenessWarnings, Converter={StaticResource FamilyMapVis}, ConverterParameter=BlockedIps}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Could not save" Severity="Error" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding FamilyErrors, Converter={StaticResource FamilyMap}, ConverterParameter=BlockedIps}"
+                                        Visibility="{Binding FamilyErrors, Converter={StaticResource FamilyMapVis}, ConverterParameter=BlockedIps}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Saved" Severity="Success" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding FamilyNotices, Converter={StaticResource FamilyMap}, ConverterParameter=BlockedIps}"
+                                        Visibility="{Binding FamilyNotices, Converter={StaticResource FamilyMapVis}, ConverterParameter=BlockedIps}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ContentControl Content="{Binding Editors[2]}" ContentTemplate="{StaticResource FamilyEditorBodyTemplate}" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- ============================================ ALLOWED IPS -->
+                    <Border Style="{StaticResource FamilySectionBorder}">
+                        <StackPanel>
+                            <Grid Margin="0,0,0,6">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                    <TextBlock Text="Allowed IPs" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="{Binding Editors[3].Summary}" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,1,0,0" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <ui:Button Content="Enable &amp; wire" Tag="AllowedIps" Click="EnableFamily_Click" Margin="0,0,6,0" />
+                                    <ui:Button Content="Revert" Click="FamilyRevert_Click"
+                                               IsEnabled="{Binding Editors[3].IsDirty}" Margin="0,0,6,0" />
+                                    <ui:Button Content="Save" Appearance="Primary" Tag="AllowedIps" Click="FamilySave_Click"
+                                               IsEnabled="{Binding Editors[3].IsDirty}" />
+                                </StackPanel>
+                            </Grid>
+                            <ui:InfoBar Title="Managed externally" Severity="Warning" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding ExternalPathBanners, Converter={StaticResource FamilyMap}, ConverterParameter=AllowedIps}"
+                                        Visibility="{Binding ExternalPathBanners, Converter={StaticResource FamilyMapVis}, ConverterParameter=AllowedIps}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Enabled, but empty" Severity="Warning" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding EmptyButWiredBanners, Converter={StaticResource FamilyMap}, ConverterParameter=AllowedIps}"
+                                        Visibility="{Binding EmptyButWiredBanners, Converter={StaticResource FamilyMapVis}, ConverterParameter=AllowedIps}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Changed on disk" Severity="Warning" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding StalenessWarnings, Converter={StaticResource FamilyMap}, ConverterParameter=AllowedIps}"
+                                        Visibility="{Binding StalenessWarnings, Converter={StaticResource FamilyMapVis}, ConverterParameter=AllowedIps}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Could not save" Severity="Error" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding FamilyErrors, Converter={StaticResource FamilyMap}, ConverterParameter=AllowedIps}"
+                                        Visibility="{Binding FamilyErrors, Converter={StaticResource FamilyMapVis}, ConverterParameter=AllowedIps}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Saved" Severity="Success" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding FamilyNotices, Converter={StaticResource FamilyMap}, ConverterParameter=AllowedIps}"
+                                        Visibility="{Binding FamilyNotices, Converter={StaticResource FamilyMapVis}, ConverterParameter=AllowedIps}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ContentControl Content="{Binding Editors[3]}" ContentTemplate="{StaticResource FamilyEditorBodyTemplate}" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- ============================================ CLOAKING -->
+                    <Border Style="{StaticResource FamilySectionBorder}">
+                        <StackPanel>
+                            <Grid Margin="0,0,0,6">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                    <TextBlock Text="Cloaking" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="{Binding Editors[4].Summary}" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,1,0,0" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <ui:Button Content="Enable &amp; wire" Tag="Cloaking" Click="EnableFamily_Click" Margin="0,0,6,0" />
+                                    <ui:Button Content="Revert" Click="FamilyRevert_Click"
+                                               IsEnabled="{Binding Editors[4].IsDirty}" Margin="0,0,6,0" />
+                                    <ui:Button Content="Save" Appearance="Primary" Tag="Cloaking" Click="FamilySave_Click"
+                                               IsEnabled="{Binding Editors[4].IsDirty}" />
+                                </StackPanel>
+                            </Grid>
+                            <ui:InfoBar Title="Managed externally" Severity="Warning" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding ExternalPathBanners, Converter={StaticResource FamilyMap}, ConverterParameter=Cloaking}"
+                                        Visibility="{Binding ExternalPathBanners, Converter={StaticResource FamilyMapVis}, ConverterParameter=Cloaking}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Enabled, but empty" Severity="Warning" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding EmptyButWiredBanners, Converter={StaticResource FamilyMap}, ConverterParameter=Cloaking}"
+                                        Visibility="{Binding EmptyButWiredBanners, Converter={StaticResource FamilyMapVis}, ConverterParameter=Cloaking}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Changed on disk" Severity="Warning" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding StalenessWarnings, Converter={StaticResource FamilyMap}, ConverterParameter=Cloaking}"
+                                        Visibility="{Binding StalenessWarnings, Converter={StaticResource FamilyMapVis}, ConverterParameter=Cloaking}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Could not save" Severity="Error" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding FamilyErrors, Converter={StaticResource FamilyMap}, ConverterParameter=Cloaking}"
+                                        Visibility="{Binding FamilyErrors, Converter={StaticResource FamilyMapVis}, ConverterParameter=Cloaking}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Saved" Severity="Success" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding FamilyNotices, Converter={StaticResource FamilyMap}, ConverterParameter=Cloaking}"
+                                        Visibility="{Binding FamilyNotices, Converter={StaticResource FamilyMapVis}, ConverterParameter=Cloaking}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ContentControl Content="{Binding Editors[4]}" ContentTemplate="{StaticResource FamilyEditorBodyTemplate}" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- ============================================ FORWARDING -->
+                    <Border Style="{StaticResource FamilySectionBorder}">
+                        <StackPanel>
+                            <Grid Margin="0,0,0,6">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                    <TextBlock Text="Forwarding" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="{Binding Editors[5].Summary}" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,1,0,0" />
+                                    <TextBlock Text="Order is load-bearing (first match wins) — the list preserves it verbatim."
+                                               FontSize="10" Foreground="#b25e09" Margin="0,1,0,0" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <ui:Button Content="Enable &amp; wire" Tag="Forwarding" Click="EnableFamily_Click" Margin="0,0,6,0" />
+                                    <ui:Button Content="Revert" Click="FamilyRevert_Click"
+                                               IsEnabled="{Binding Editors[5].IsDirty}" Margin="0,0,6,0" />
+                                    <ui:Button Content="Save" Appearance="Primary" Tag="Forwarding" Click="FamilySave_Click"
+                                               IsEnabled="{Binding Editors[5].IsDirty}" />
+                                </StackPanel>
+                            </Grid>
+                            <ui:InfoBar Title="Managed externally" Severity="Warning" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding ExternalPathBanners, Converter={StaticResource FamilyMap}, ConverterParameter=Forwarding}"
+                                        Visibility="{Binding ExternalPathBanners, Converter={StaticResource FamilyMapVis}, ConverterParameter=Forwarding}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Enabled, but empty" Severity="Warning" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding EmptyButWiredBanners, Converter={StaticResource FamilyMap}, ConverterParameter=Forwarding}"
+                                        Visibility="{Binding EmptyButWiredBanners, Converter={StaticResource FamilyMapVis}, ConverterParameter=Forwarding}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Changed on disk" Severity="Warning" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding StalenessWarnings, Converter={StaticResource FamilyMap}, ConverterParameter=Forwarding}"
+                                        Visibility="{Binding StalenessWarnings, Converter={StaticResource FamilyMapVis}, ConverterParameter=Forwarding}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Could not save" Severity="Error" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding FamilyErrors, Converter={StaticResource FamilyMap}, ConverterParameter=Forwarding}"
+                                        Visibility="{Binding FamilyErrors, Converter={StaticResource FamilyMapVis}, ConverterParameter=Forwarding}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ui:InfoBar Title="Saved" Severity="Success" IsOpen="True" IsClosable="False" Margin="0,0,0,6"
+                                        Message="{Binding FamilyNotices, Converter={StaticResource FamilyMap}, ConverterParameter=Forwarding}"
+                                        Visibility="{Binding FamilyNotices, Converter={StaticResource FamilyMapVis}, ConverterParameter=Forwarding}">
+                                <ui:InfoBar.Style><Style TargetType="ui:InfoBar" BasedOn="{StaticResource {x:Type ui:InfoBar}}" /></ui:InfoBar.Style>
+                            </ui:InfoBar>
+                            <ContentControl Content="{Binding Editors[5]}" ContentTemplate="{StaticResource FamilyEditorBodyTemplate}" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- ============================================ BLOCKING TOGGLES -->
+                    <Border Style="{StaticResource FamilySectionBorder}">
+                        <StackPanel>
+                            <Grid Margin="0,0,0,6">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Blocking behaviour"
+                                           FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" VerticalAlignment="Center" />
+                                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                    <ui:Button Content="Revert" Click="ConfigRevert_Click"
+                                               IsEnabled="{Binding IsDirty}" Margin="0,0,6,0" />
+                                    <ui:Button Content="Save &amp; apply" Appearance="Primary"
+                                               Click="ConfigSave_Click" IsEnabled="{Binding CanSaveConfig}" />
+                                </StackPanel>
+                            </Grid>
+
+                            <Grid Margin="0,4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="Block IPv6 (block_ipv6)" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="Return an empty answer to AAAA queries. AAAA answers are IPv6 addresses — useful when your connection has no working IPv6; it breaks anything reachable only over IPv6."
+                                               FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <ui:ToggleSwitch Grid.Column="1" Tag="block_ipv6" Click="BoolToggle_Click"
+                                                 IsChecked="{Binding ToggleValues, Converter={StaticResource FamilyMap}, ConverterParameter=block_ipv6, Mode=OneWay, TargetNullValue=False}" />
+                            </Grid>
+
+                            <Grid Margin="0,4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="Block unqualified names (block_unqualified)" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="Block names with no dot (bare hostnames). Names like 'printer' only mean something on your own network — sending them to the internet just leaks your device names, so blocking them is safe."
+                                               FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <ui:ToggleSwitch Grid.Column="1" Tag="block_unqualified" Click="BoolToggle_Click"
+                                                 IsChecked="{Binding ToggleValues, Converter={StaticResource FamilyMap}, ConverterParameter=block_unqualified, Mode=OneWay, TargetNullValue=False}" />
+                            </Grid>
+
+                            <Grid Margin="0,4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="Block undelegated names (block_undelegated)" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="Block names not in the global DNS (e.g. .local). These names cannot exist on the public internet; looking them up only leaks information about your network, so blocking them is safe."
+                                               FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <ui:ToggleSwitch Grid.Column="1" Tag="block_undelegated" Click="BoolToggle_Click"
+                                                 IsChecked="{Binding ToggleValues, Converter={StaticResource FamilyMap}, ConverterParameter=block_undelegated, Mode=OneWay, TargetNullValue=False}" />
+                            </Grid>
+
+                            <Grid Margin="0,4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="Synthesize PTR for cloaked names (cloak_ptr)" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="Answer reverse lookups for cloaked names. A reverse lookup asks 'what name belongs to this address?' — with this on, an address you have cloaked answers with your chosen name instead of the real one."
+                                               FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <ui:ToggleSwitch Grid.Column="1" Tag="cloak_ptr" Click="BoolToggle_Click"
+                                                 IsChecked="{Binding ToggleValues, Converter={StaticResource FamilyMap}, ConverterParameter=cloak_ptr, Mode=OneWay, TargetNullValue=False}" />
+                            </Grid>
+
+                            <Grid Margin="0,4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                    <TextBlock Text="Rejected-answer TTL, seconds (reject_ttl)" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="How long clients cache a blocked answer. In seconds — apps remember 'this name is blocked' for this long, so after you unblock something it can stay blocked in an app until the timer runs out."
+                                               FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <ui:NumberBox Grid.Column="1" Tag="reject_ttl"
+                                              MaxDecimalPlaces="0" Minimum="0" MinWidth="140"
+                                              LostFocus="LongBox_LostFocus"
+                                              Value="{Binding ToggleValues, Converter={StaticResource FamilyMap}, ConverterParameter=reject_ttl, Mode=OneWay}" />
+                            </Grid>
+
+                            <Grid Margin="0,4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                    <TextBlock Text="Cloaked-answer TTL, seconds (cloak_ttl)" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="How long clients cache a cloaked answer. In seconds — apps remember the substitute answer for this long, so a changed or removed cloak can take this long to show up."
+                                               FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <ui:NumberBox Grid.Column="1" Tag="cloak_ttl"
+                                              MaxDecimalPlaces="0" Minimum="0" MinWidth="140"
+                                              LostFocus="LongBox_LostFocus"
+                                              Value="{Binding ToggleValues, Converter={StaticResource FamilyMap}, ConverterParameter=cloak_ttl, Mode=OneWay}" />
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+    </Grid>
+</UserControl>

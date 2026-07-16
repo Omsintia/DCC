@@ -1,0 +1,84 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <SupportedOSPlatform>windows</SupportedOSPlatform>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>DnsCryptControl.Service</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Phase 4 supply-chain: pure-managed Ed25519 + BLAKE2b-512 for minisign verification.
+         Service assembly ONLY (never Core/Ipc/Platform/UI). NuGetAudit-clean at 2.6.2. -->
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.1" />
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Management.Infrastructure" Version="3.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DnsCryptControl.Ipc\DnsCryptControl.Ipc.csproj" />
+    <ProjectReference Include="..\DnsCryptControl.Core\DnsCryptControl.Core.csproj" />
+    <ProjectReference Include="..\DnsCryptControl.Platform\DnsCryptControl.Platform.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>DnsCryptControl.Service.Tests</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>DnsCryptControl.Fuzzing</_Parameter1>
+    </AssemblyAttribute>
+    <!-- Phase 6c shared fuzz-target library: exercises the internal minisign verify path
+         (MinisignVerifier.Verify) through the same door the Fuzzing property suite uses. -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>DnsCryptControl.FuzzTargets</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Bundled, minisign-signed ODoH source-list caches (post-5j ODoH fix). Embedded (not loose
+         Content) so they ship inside the signed helper binary and cannot be tampered/deleted on disk.
+         LogicalName = the target filename in the proxy's cache dir; FileSystemConfigStore places them
+         BYTE-EXACT so the detached .minisig verifies against the pinned key. .gitattributes marks
+         these paths binary so git never rewrites their line endings (which would break the signature). -->
+    <EmbeddedResource Include="Assets\odoh\odoh-servers.md">
+      <LogicalName>odoh-servers.md</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\odoh\odoh-servers.md.minisig">
+      <LogicalName>odoh-servers.md.minisig</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\odoh\odoh-relays.md">
+      <LogicalName>odoh-relays.md</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\odoh\odoh-relays.md.minisig">
+      <LogicalName>odoh-relays.md.minisig</LogicalName>
+    </EmbeddedResource>
+    <!-- Bundled DEFAULT source-list cache (fresh-install brick fix). Same discipline as the ODoH
+         assets above: embedded in the signed helper, placed byte-exact by FileSystemConfigStore
+         (EnsureDefaultSourceCaches) so the shipped config's public-resolvers source loads from
+         cache instead of the boot-time download that is FATAL when the off-53 bootstrap can't
+         resolve the list URL. -->
+    <EmbeddedResource Include="Assets\default-lists\public-resolvers.md">
+      <LogicalName>public-resolvers.md</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\default-lists\public-resolvers.md.minisig">
+      <LogicalName>public-resolvers.md.minisig</LogicalName>
+    </EmbeddedResource>
+    <!-- DNSCrypt anonymization relays (relays.md) - a SEPARATE list from public-resolvers.md, so
+         anonymized DNSCrypt has NO relays to route through until this is seeded. Placed byte-exact +
+         signature-verified by EnsureDefaultSourceCaches and referenced by [sources.'relays'] in the
+         shipped toml, so the proxy loads it from cache instead of the boot-time download. -->
+    <EmbeddedResource Include="Assets\default-lists\relays.md">
+      <LogicalName>relays.md</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\default-lists\relays.md.minisig">
+      <LogicalName>relays.md.minisig</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>

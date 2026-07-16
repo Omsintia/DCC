@@ -1,0 +1,396 @@
+<UserControl x:Class="DnsCryptControl.UI.Views.DashboardView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+    xmlns:converters="clr-namespace:DnsCryptControl.UI.Converters"
+    mc:Ignorable="d"
+    d:DesignHeight="720" d:DesignWidth="1000">
+
+    <UserControl.Resources>
+        <converters:ProtectionStatusToAppearanceConverter x:Key="StatusToAppearance" />
+        <converters:ProtectionStatusToTextConverter x:Key="StatusToText" />
+        <converters:ProtectionStatusToBrushConverter x:Key="StatusToBrush" />
+        <converters:NullToVisibilityConverter x:Key="NullToVisibility" />
+        <!-- Phase 5i: Live Activity shows recent queries only while logging is on; the off-prompt shows only while off. -->
+        <converters:InverseBoolToVisibilityConverter x:Key="InverseBoolToVisibility" />
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+        <converters:ProtectionStatusToHelperUnavailableVisibilityConverter x:Key="StatusToHelperUnavailableVisibility" />
+        <converters:ProtectionStatusToHelperBannerMessageConverter x:Key="StatusToHelperBannerMessage" />
+
+        <!-- Empty-state text shown in place of the resolver name when none is detected yet. -->
+        <Style x:Key="ResolverNameStyle" TargetType="TextBlock">
+            <Setter Property="Text" Value="{Binding ActiveResolverName}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding ActiveResolverName}" Value="{x:Null}">
+                    <Setter Property="Text" Value="No active resolver detected" />
+                    <Setter Property="FontStyle" Value="Italic" />
+                    <Setter Property="FontWeight" Value="Normal" />
+                    <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Advisory InfoBar is only open while there is a non-null advisory message. -->
+        <Style x:Key="AdvisoryInfoBarStyle" TargetType="ui:InfoBar">
+            <Setter Property="IsOpen" Value="True" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Advisory}" Value="{x:Null}">
+                    <Setter Property="IsOpen" Value="False" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </UserControl.Resources>
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="16">
+        <StackPanel>
+
+            <!-- Helper-unavailable / helper-incompatible banner (D1/F20): the unprivileged
+                 UI can never install or start the SYSTEM helper itself, so when the helper
+                 is unreachable OR answering on an incompatible protocol version this is
+                 the blocking, prominent affordance telling the user how to fix it and
+                 letting them re-check once they have. Title/Message swap per-status via
+                 StatusToHelperBannerMessage; visible for HelperUnavailable AND
+                 HelperIncompatible. (ui:InfoBar 4.3.0 has no custom action-button slot, so
+                 the "Re-check" action is a plain ui:Button next to an ui:InfoBar used for
+                 the message.) -->
+            <Grid Visibility="{Binding Status, Converter={StaticResource StatusToHelperUnavailableVisibility}}"
+                  Margin="0,0,0,12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <ui:InfoBar Grid.Column="0"
+                            Title="{Binding Status, Converter={StaticResource StatusToHelperBannerMessage}, ConverterParameter=Title}"
+                            Message="{Binding Status, Converter={StaticResource StatusToHelperBannerMessage}, ConverterParameter=Message}"
+                            Severity="Warning"
+                            IsOpen="True"
+                            IsClosable="False" />
+                <ui:Button Grid.Column="1"
+                           Content="Re-check"
+                           Appearance="Primary"
+                           Command="{Binding RepairCommand}"
+                           VerticalAlignment="Center"
+                           Margin="8,0,0,0" />
+            </Grid>
+
+            <!-- 5h hero banner (mockup-derived): status-tinted panel with a coloured shield
+                 square, a big honest headline and a plain-language subtitle; the three
+                 protection toggles sit in the horizontal row below (5g user feedback).
+                 DOCUMENT ORDER of the toggles (master -> kill switch -> browser DoH) is
+                 load-bearing: the VM kit's Get-MasterToggle/Get-KillSwitchToggle walk the
+                 UIA tree in this order. Tints come from ProtectionStatusToBrushConverter
+                 (alpha over the theme surface — correct on Dark AND Light). -->
+            <Border CornerRadius="10" Padding="16,14" Margin="0,0,0,12" BorderThickness="1"
+                    Background="{Binding Status, Converter={StaticResource StatusToBrush}, ConverterParameter=HeroBackground}"
+                    BorderBrush="{Binding Status, Converter={StaticResource StatusToBrush}, ConverterParameter=HeroBorder}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <Grid Grid.Row="0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <Border Grid.Column="0" Width="44" Height="44" CornerRadius="10"
+                                VerticalAlignment="Center"
+                                Background="{Binding Status, Converter={StaticResource StatusToBrush}, ConverterParameter=Dot}">
+                            <ui:SymbolIcon Symbol="ShieldCheckmark24" FontSize="22" Foreground="White"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+
+                        <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="14,0,0,0">
+                            <TextBlock FontSize="18" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                       Text="{Binding HeroHeadline}" />
+                            <TextBlock FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                       Text="{Binding HeroSubtitle}" />
+                        </StackPanel>
+                    </Grid>
+
+                    <UniformGrid Grid.Row="1" Columns="3" Margin="0,14,0,0">
+                        <StackPanel Margin="0,0,16,0">
+                            <!-- Command drives the user action; IsProtected (one-way) reflects VM
+                                 state back — never a two-way binding, so the VM finishing an
+                                 async toggle never re-fires ToggleProtectionCommand. -->
+                            <ui:ToggleSwitch AutomationProperties.AutomationId="MasterProtectionToggle"
+                                              Command="{Binding ToggleProtectionCommand}"
+                                              IsChecked="{Binding IsProtected, Mode=OneWay}"
+                                              OnContent="On"
+                                              OffContent="Off"
+                                              ToolTip="Master protection toggle: enables/disables the proxy service and adapter DNS. The word &quot;Protected&quot; is reserved for the diagnostics-verified status badge above." />
+                            <!-- 5g WP5: the ToolTip explanations, surfaced as visible captions. -->
+                            <TextBlock Text="The main switch — On sends this device's DNS through the encrypted proxy; Off returns Windows to its normal DNS."
+                                       FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Margin="0,4,0,0" />
+                        </StackPanel>
+                        <StackPanel Margin="0,0,16,0">
+                            <ui:ToggleSwitch AutomationProperties.AutomationId="KillSwitchToggle"
+                                              IsChecked="{Binding KillSwitchOptIn, Mode=TwoWay}"
+                                              OnContent="Kill switch: on"
+                                              OffContent="Kill switch: off"
+                                              FontSize="11"
+                                              ToolTip="Opt into the firewall kill switch the next time protection is enabled." />
+                            <TextBlock Text="While armed, this blocks direct DNS on the standard ports (even encrypted DNS-over-TLS) for every program, so if the proxy ever stops nothing can quietly fall back to unprotected DNS. Best turned on before the main switch — it arms when protection is switched on, so if you turn it on while already protected, toggle protection off and on once to arm it."
+                                       FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Margin="0,4,0,0" />
+                        </StackPanel>
+                        <StackPanel>
+                            <!-- Phase 5f: browser-DoH toggle. Command-driven + OneWay IsChecked (like the
+                                 master toggle): the VM fires SetBrowserDohPolicy then reconciles the shown
+                                 state from diagnostics. Enabled only when its live state is known (protected),
+                                 so it never asserts a stale value. -->
+                            <ui:ToggleSwitch AutomationProperties.AutomationId="BrowserDohToggle"
+                                              IsChecked="{Binding BrowserDohEnabled, Mode=OneWay}"
+                                              IsEnabled="{Binding BrowserDohStateKnown}"
+                                              Command="{Binding ToggleBrowserDohCommand}"
+                                              OnContent="Browser DoH: blocked"
+                                              OffContent="Browser DoH: allowed"
+                                              FontSize="11"
+                                              ToolTip="Stop Chrome/Edge/Firefox using their own DNS-over-HTTPS (which bypasses DnsCrypt). Its state is read from diagnostics while protection is on." />
+                            <TextBlock Text="Chrome, Edge and Firefox can use their own built-in DNS and skip your protection. 'Blocked' keeps those three browsers on this app's DNS — other apps aren't covered by this switch."
+                                       FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" Margin="0,4,0,0" />
+                        </StackPanel>
+                    </UniformGrid>
+                </Grid>
+            </Border>
+
+            <!-- Inline notices. NOTE: this banner is about the LEAK MITIGATIONS (SMHNR / parallel
+                 A+AAAA registry policy applied on every enable), NOT the kill switch. Windows won't
+                 let the DNS Client (Dnscache) service reload those at runtime, so they fully apply
+                 only after a reboot. Core protection + the kill switch are already active without it.
+                 The wording names the real subsystem so users don't read it as "the kill switch needs
+                 a reboot" (it sits just under the toggles). -->
+            <ui:InfoBar Title="Reboot recommended to finish a Windows leak fix"
+                        Message="A Windows DNS-leak mitigation (Smart Multi-Homed Name Resolution) takes full effect only after a reboot — the Windows DNS Client service can't reload it while running. Your encrypted DNS and, if enabled, the kill switch are already active without rebooting; this only closes a residual leak path."
+                        Severity="Warning"
+                        IsOpen="{Binding RebootRecommended}"
+                        IsClosable="False"
+                        Margin="0,0,0,8" />
+
+            <ui:InfoBar Title="Advisory"
+                        Message="{Binding Advisory}"
+                        Severity="Warning"
+                        IsClosable="False"
+                        Style="{StaticResource AdvisoryInfoBarStyle}"
+                        Margin="0,0,0,8" />
+
+            <!-- Live per-session KPI cards (wired in Phase 5i to the shared query-log session).
+                 5g-4: ONE compact link under the grid (not one per card) navigates to the Query
+                 Monitor via code-behind → MainWindow (MVVM: the VM never sees the window).
+                 Navigation never enables logging — the consent gate lives in the Query Monitor. -->
+            <UniformGrid Columns="4" Margin="0,0,0,4">
+                <ui:Card Margin="0,0,8,0">
+                    <StackPanel>
+                        <TextBlock Text="QUERIES (SESSION)" FontSize="10" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        <TextBlock Text="{Binding QueriesValue}" FontSize="15" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,6,0,0" />
+                    </StackPanel>
+                </ui:Card>
+                <ui:Card Margin="0,0,8,0">
+                    <StackPanel>
+                        <TextBlock Text="BLOCKED" FontSize="10" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        <TextBlock Text="{Binding BlockedValue}" FontSize="15" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,6,0,0" />
+                    </StackPanel>
+                </ui:Card>
+                <ui:Card Margin="0,0,8,0">
+                    <StackPanel>
+                        <TextBlock Text="ANSWERED LOCALLY" FontSize="10" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        <TextBlock Text="{Binding AnsweredLocallyValue}" FontSize="15" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,6,0,0" />
+                        <!-- Honesty caption: this is NOT a cache-hit rate. server=='-' rows fold blocks +
+                             cloaks + synth + cache together (the proxy log has no cache marker), so a pure
+                             cache rate can't be shown truthfully. See IQueryLogSession.AnsweredLocally. -->
+                        <TextBlock Text="Answered on your PC without asking an upstream server — blocked, cloaked, or cached (not just cache)."
+                                   FontSize="10" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap" Margin="0,4,0,0" />
+                    </StackPanel>
+                </ui:Card>
+                <ui:Card>
+                    <StackPanel>
+                        <TextBlock Text="AVG LATENCY" FontSize="10" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        <TextBlock Text="{Binding AvgLatencyValue}" FontSize="15" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,6,0,0" />
+                    </StackPanel>
+                </ui:Card>
+            </UniformGrid>
+            <ui:HyperlinkButton Content="Open Query Monitor"
+                                Click="OpenQueryMonitor_Click"
+                                FontSize="12"
+                                Padding="4,2"
+                                HorizontalAlignment="Left"
+                                Margin="0,0,0,12" />
+
+            <!-- Active resolver + adapters / live activity placeholder -->
+            <Grid Margin="0,0,0,12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <ui:Card Grid.Column="0" Margin="0,0,6,0" VerticalAlignment="Stretch">
+                    <StackPanel>
+                        <TextBlock Text="ACTIVE RESOLVER" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,0,0,8" />
+
+                        <Grid Margin="0,0,0,4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Name" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,0,8,0" />
+                            <TextBlock Grid.Column="1" Style="{StaticResource ResolverNameStyle}" HorizontalAlignment="Right" />
+                        </Grid>
+
+                        <!-- 5h: mockup-style detail rows, looked up from the proxy's cached lists
+                             when the active resolver name changes; rows collapse when unknown
+                             (fail-closed display, never a guess). First-stamp facts — the same
+                             badges the Resolvers tab shows. -->
+                        <Grid Margin="0,0,0,4"
+                              Visibility="{Binding ActiveResolverProtocol, Converter={StaticResource NullToVisibility}}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Protocol" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,0,8,0" />
+                            <Border Grid.Column="1" HorizontalAlignment="Right" CornerRadius="8" Padding="7,1"
+                                    Background="{DynamicResource ControlFillColorDefaultBrush}"
+                                    BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
+                                <TextBlock Text="{Binding ActiveResolverProtocol}" FontSize="10" FontWeight="SemiBold" />
+                            </Border>
+                        </Grid>
+                        <Grid Margin="0,0,0,4"
+                              Visibility="{Binding ActiveResolverProtocol, Converter={StaticResource NullToVisibility}}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Properties" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,0,8,0" />
+                            <ItemsControl Grid.Column="1" HorizontalAlignment="Right" ItemsSource="{Binding ActiveResolverProperties}">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <StackPanel Orientation="Horizontal" />
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border CornerRadius="8" Padding="7,1" Margin="4,0,0,0"
+                                                Background="{DynamicResource ControlFillColorDefaultBrush}"
+                                                BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
+                                            <TextBlock Text="{Binding}" FontSize="10" />
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </Grid>
+                        <Grid Margin="0,0,0,4"
+                              Visibility="{Binding ActiveResolverAddress, Converter={StaticResource NullToVisibility}}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Address" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,0,8,0" />
+                            <TextBlock Grid.Column="1" HorizontalAlignment="Right" FontWeight="SemiBold"
+                                       Text="{Binding ActiveResolverAddress}" />
+                        </Grid>
+                        <Grid Margin="0,0,0,4"
+                              Visibility="{Binding ActiveResolverLocation, Converter={StaticResource NullToVisibility}}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Location" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,0,8,0" />
+                            <TextBlock Grid.Column="1" HorizontalAlignment="Right" FontWeight="SemiBold"
+                                       Text="{Binding ActiveResolverLocation}" />
+                        </Grid>
+
+                        <TextBlock Text="PROTECTED NETWORK ADAPTERS"
+                                   FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                   Margin="0,16,0,8" />
+                        <Grid Margin="0,0,0,4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Ethernet" VerticalAlignment="Center" />
+                            <ui:ToggleSwitch Grid.Column="1"
+                                              IsChecked="{Binding IsProtected, Mode=OneWay}"
+                                              IsEnabled="False"
+                                              ToolTip="Display-only — adapter DNS is applied atomically by the master toggle." />
+                        </Grid>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Wi-Fi" VerticalAlignment="Center" />
+                            <ui:ToggleSwitch Grid.Column="1"
+                                              IsChecked="{Binding IsProtected, Mode=OneWay}"
+                                              IsEnabled="False"
+                                              ToolTip="Display-only — adapter DNS is applied atomically by the master toggle." />
+                        </Grid>
+                    </StackPanel>
+                </ui:Card>
+
+                <ui:Card Grid.Column="1" Margin="6,0,0,0" VerticalAlignment="Stretch">
+                    <StackPanel>
+                        <TextBlock Text="LIVE ACTIVITY" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,0,0,8" />
+                        <!-- Phase 5i: off-state prompt — shown only while query logging is off. -->
+                        <TextBlock Text="Turn on query logging in the Query Monitor tab to see live traffic and recent queries here."
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap"
+                                   Visibility="{Binding LoggingActive, Converter={StaticResource InverseBoolToVisibility}}" />
+                        <!-- Phase 5i: recent queries (newest first) — shown ONLY while logging is on; cleared the
+                             instant logging is turned off, so browsing data never lingers on the Dashboard. -->
+                        <ItemsControl ItemsSource="{Binding RecentQueries}"
+                                      Visibility="{Binding LoggingActive, Converter={StaticResource BoolToVisibility}}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Margin="0,2,0,2">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="{Binding Name}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                        <Border Grid.Column="1" CornerRadius="6" Padding="6,1" Margin="6,0,0,0"
+                                                Background="{DynamicResource ControlFillColorDefaultBrush}"
+                                                BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
+                                            <TextBlock Text="{Binding ActionLabel}" FontSize="10" FontWeight="SemiBold" />
+                                        </Border>
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <!-- 5g-4: same navigation as the KPI link (shared Click handler). -->
+                        <ui:HyperlinkButton Content="Open Query Monitor"
+                                            Click="OpenQueryMonitor_Click"
+                                            Padding="4,2"
+                                            HorizontalAlignment="Left"
+                                            Margin="0,8,0,0" />
+                    </StackPanel>
+                </ui:Card>
+            </Grid>
+
+            <!-- Quick actions. Only wired actions live here — the earlier "Run leak / connectivity
+                 test", "Switch resolver" and "Update sources" placeholders were removed (they had no
+                 command behind them): the leak check already lives in Logs & Diagnostics, resolver
+                 switching in the Resolvers tab, and source refresh is the proxy's own scheduled job
+                 (and would need a network download this offline-by-design app forbids). -->
+            <WrapPanel>
+                <ui:Button Content="Restart service"
+                           Icon="{ui:SymbolIcon ArrowSyncCircle24}"
+                           Appearance="Primary"
+                           Command="{Binding RestartCommand}"
+                           ToolTip="Stops and starts the dnscrypt-proxy service. Useful when it seems stuck; your settings are untouched and protection resumes as soon as it is back up."
+                           Margin="0,0,8,8" />
+                <ui:Button Content="Flush DNS cache"
+                           Icon="{ui:SymbolIcon Broom24}"
+                           Command="{Binding FlushCommand}"
+                           ToolTip="Clears Windows' remembered DNS answers so every name is looked up fresh. Handy after changing filters or resolvers — old answers stop lingering."
+                           Margin="0,0,8,8" />
+            </WrapPanel>
+
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

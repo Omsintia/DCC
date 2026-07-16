@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Phase 6 fuzzing harness. CsCheck property-based fuzzing that runs inside the normal
+    `dotnet test` (honours the repo's Category!=ManualIntegration filter). Targets are tagged
+    [Trait("Category","Fuzz")] so CI can run a quick smoke pass on PR and a deep pass nightly.
+    Starts Core-only; project references to Ipc/Service/UI/Platform are added as their targets
+    land (adding UI/Service retargets this to net8.0-windows — see the phase-6 design spec).
+  -->
+  <PropertyGroup>
+    <!-- net8.0-windows so the harness can reference the WPF UI + the Windows helper (Service/Platform)
+         for the Service/UI-layer targets (minisign, zip, config-store, state-stores, log_file sink). -->
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="CsCheck" Version="4.7.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Frozen differential-oracle corpora (input + the pinned 2.1.16 Go verdict), copied next to the
+         test assembly so the differential suite runs offline in CI with NO Go toolchain (6b). The live
+         oracle.exe (tools/oracles) is preferred locally for fresh divergence discovery. -->
+    <None Include="Corpus\**\*" CopyToOutputDirectory="PreserveNewest" LinkBase="Corpus" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DnsCryptControl.Core\DnsCryptControl.Core.csproj" />
+    <ProjectReference Include="..\..\src\DnsCryptControl.Ipc\DnsCryptControl.Ipc.csproj" />
+    <ProjectReference Include="..\..\src\DnsCryptControl.Platform\DnsCryptControl.Platform.csproj" />
+    <ProjectReference Include="..\..\src\DnsCryptControl.Service\DnsCryptControl.Service.csproj" />
+    <ProjectReference Include="..\..\src\DnsCryptControl.UI\DnsCryptControl.UI.csproj" />
+    <!-- 6c: the shared fuzz-target invariants, re-fed by CrashCorpusReplayTests. Referencing this here
+         keeps the coverage-guided harness and the offline replay asserting the identical contracts. -->
+    <ProjectReference Include="..\DnsCryptControl.FuzzTargets\DnsCryptControl.FuzzTargets.csproj" />
+  </ItemGroup>
+
+</Project>

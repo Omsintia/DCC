@@ -1,0 +1,40 @@
+# Phase 6 CI - per-PR gate. Thin wrapper: it only checks out, sets up the .NET 8 SDK, and runs
+# tools/ci/ci.ps1 (the single source of truth, which also runs locally). The gate is offline +
+# toolchain-free: a strict Release build + the full non-manual test suite (which already contains the
+# fuzz smoke, the offline crash-replay, and the differential-oracle frozen vectors).
+#
+# This workflow does nothing until the repo has a GitHub remote; it is committed now so cloud CI works
+# the instant one is added, with zero rework.
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same ref cancels an in-flight run of this gate.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Per-PR gate (strict build + tests)
+    runs-on: windows-latest   # WPF/Service targets are Windows-only
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4   # shallow is fine: the frozen-wire gate is in-memory, no git history needed
+
+      - name: Set up .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Run per-PR gate
+        shell: pwsh
+        run: ./tools/ci/ci.ps1

@@ -1,0 +1,4 @@
+[2026-07-09 08:00:01]	127.0.0.1	example.com	A	PASS	12ms	cloudflare	-
+[2026-07-09 08:00:02]	127.0.0.1	doubleclick.net	A	REJECT	0ms	-	-
+[2026-07-09 08:00:03]	::1	quad9.net	AAAA	CLOAK	3ms	quad9-dnscrypt-ip4-filter-pri	-
+[2026-07-09 08:00:04]	127.0.0.1	ads.example	A	SYNTH	1ms	-	anon-cs-fr
