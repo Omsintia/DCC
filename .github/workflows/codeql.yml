@@ -32,7 +32,7 @@ jobs:
       - name: Set up .NET 8 SDK
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: '8.0.422'   # pinned to match CI (a newer floating SDK breaks the strict build)
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
