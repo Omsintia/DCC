@@ -37,8 +37,12 @@ default (Quad9 DoH) and works out of the box.
 
 Every mode is fully encrypted and works behind the kill switch — they differ
 only in *how much the resolver learns about you*. All three are verified working
-on the current build (see [docs/RECOMMENDED-SETTINGS.md](docs/RECOMMENDED-SETTINGS.md)
-for a full setup guide).
+on the current build.
+
+> **📖 Full step-by-step setup guide, with a screenshot for every click:**
+> **[docs/SETUP-GUIDE.md](docs/SETUP-GUIDE.md)** — or read it as a web page at
+> **[omsintia.github.io/DCC](https://omsintia.github.io/DCC/)**.
+> For a settings reference, see [docs/RECOMMENDED-SETTINGS.md](docs/RECOMMENDED-SETTINGS.md).
 
 **1 · Encrypted DNS, direct** *(default)* — a DoH or DNSCrypt resolver used
 directly (shipped default: **Quad9 DoH**). Nobody in between can read your
