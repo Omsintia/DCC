@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
-    <AnalysisLevel>latest-Recommended</AnalysisLevel>
+    <AnalysisLevel>8.0-Recommended</AnalysisLevel>
     <AnalysisModeSecurity>All</AnalysisModeSecurity>
     <NuGetAudit>true</NuGetAudit>
     <NuGetAuditMode>all</NuGetAuditMode>
