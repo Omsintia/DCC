@@ -5,6 +5,8 @@ A Windows desktop app for running **encrypted DNS** through
 **kill switch**, DNS-leak protection, anonymized DNS relays, and a clear GUI
 for everything dnscrypt-proxy can do.
 
+I’d like to thank everyone involved in the open-source projects I’ve used in the past and will use in the future, as well as everyone who supports these projects. With Claude’s help, I wanted to create a GUI that I could easily use in my daily life, and I’m sharing it with you; I welcome your feedback and criticism.
+
 DnsCryptControl encrypts every DNS lookup your PC makes (DNSCrypt, DoH, or ODoH),
 and — when you arm the kill switch — makes sure nothing quietly falls back to
 unencrypted DNS if the proxy ever stops. It ships with a sensible, private
