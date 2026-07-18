@@ -465,10 +465,18 @@
   </div>
   <div class="panel">
     <p style="margin:0 0 4px; color:var(--muted); font-size:14px; max-width:74ch;">
-      In the <b>Filtering</b> tab, paste a community blocklist into <b>Blocked&nbsp;names</b> and
-      <b>Save</b> &mdash; one domain pattern per line, in the <b>wildcard&#8209;domains</b>
-      format shown at the bottom of this panel. These are the widely used, community&#8209;maintained lists
-      the DNSCrypt project points to:</p>
+      In the <b>Filtering</b> tab, find the <b>Blocked&nbsp;names</b> card: click
+      <b>Enable&nbsp;&amp;&nbsp;wire</b> first &mdash; this creates the rule file and points the proxy at it
+      (without it the list exists but is never consulted). Then paste your blocklist into the editor
+      &mdash; one domain pattern per line, in the <b>wildcard&#8209;domains</b> format shown at the bottom
+      of this panel &mdash; and click <b>Save</b>.</p>
+    <div class="callout" style="margin:10px 0 12px;"><b>Size note (v1.2.6):</b> very large lists &mdash; like the full official
+      DNSCrypt aggregate at ~9&nbsp;MB &mdash; exceed the current 1&nbsp;MiB per&#8209;save limit and can make the editor
+      unresponsive on paste. Pick a compact list for now (HaGeZi <i>Light</i> or OISD <i>small</i> are good choices);
+      the next release lifts the limit to 16&nbsp;MiB and adds an <b>Import file&hellip;</b> button so big lists load
+      without pasting at all.</div>
+    <p style="margin:0 0 4px; color:var(--muted); font-size:14px; max-width:74ch;">
+      These are the widely used, community&#8209;maintained lists the DNSCrypt project points to:</p>
 
     <div class="lists">
       <div class="listrow"><div class="badge">D</div><div class="body">
