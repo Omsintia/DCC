@@ -116,17 +116,28 @@
                         MinHeight="80" MaxHeight="240"
                         Visibility="{Binding IsChecked, ElementName=FamilyRawToggle, Converter={StaticResource InverseBoolToVisibility}}"
                         IsEnabled="{Binding IsStructuredEditable}">
-                    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="8">
-                        <ItemsControl ItemsSource="{Binding Rows}"
-                                      ItemTemplate="{StaticResource RuleRowTemplate}"
-                                      VirtualizingPanel.IsVirtualizing="True">
-                            <ItemsControl.ItemsPanel>
-                                <ItemsPanelTemplate>
-                                    <VirtualizingStackPanel />
-                                </ItemsPanelTemplate>
-                            </ItemsControl.ItemsPanel>
-                        </ItemsControl>
-                    </ScrollViewer>
+                    <!-- The scroll host lives INSIDE the ItemsControl's template so the
+                         VirtualizingStackPanel is the ScrollViewer's IScrollInfo. With an OUTER
+                         ScrollViewer (the previous shape) the panel is measured with infinite height
+                         and realizes EVERY row — a large pasted list froze the UI right here. -->
+                    <ItemsControl ItemsSource="{Binding Rows}"
+                                  ItemTemplate="{StaticResource RuleRowTemplate}"
+                                  VirtualizingPanel.IsVirtualizing="True"
+                                  VirtualizingPanel.VirtualizationMode="Recycling">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <VirtualizingStackPanel />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.Template>
+                            <ControlTemplate TargetType="ItemsControl">
+                                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="8"
+                                              Focusable="False" CanContentScroll="True">
+                                    <ItemsPresenter />
+                                </ScrollViewer>
+                            </ControlTemplate>
+                        </ItemsControl.Template>
+                    </ItemsControl>
                 </Border>
 
                 <TextBox x:Name="FamilyRawEditor"
@@ -235,6 +246,8 @@
                                     <TextBlock Text="{Binding Editors[0].Summary}" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,1,0,0" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <ui:Button Content="Import file…" Tag="BlockedNames" Click="ImportFamily_Click" Margin="0,0,6,0"
+                                               ToolTip="Load a rule-list file into this editor (the paste-free path for big community blocklists) — you still review and Save." />
                                     <ui:Button Content="Enable &amp; wire" Tag="BlockedNames" Click="EnableFamily_Click" Margin="0,0,6,0" />
                                     <ui:Button Content="Revert" Click="FamilyRevert_Click"
                                                IsEnabled="{Binding Editors[0].IsDirty}" Margin="0,0,6,0" />
@@ -294,6 +307,8 @@
                                     <TextBlock Text="{Binding Editors[1].Summary}" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,1,0,0" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <ui:Button Content="Import file…" Tag="AllowedNames" Click="ImportFamily_Click" Margin="0,0,6,0"
+                                               ToolTip="Load a rule-list file into this editor — you still review and Save." />
                                     <ui:Button Content="Enable &amp; wire" Tag="AllowedNames" Click="EnableFamily_Click" Margin="0,0,6,0" />
                                     <ui:Button Content="Revert" Click="FamilyRevert_Click"
                                                IsEnabled="{Binding Editors[1].IsDirty}" Margin="0,0,6,0" />
@@ -343,6 +358,8 @@
                                     <TextBlock Text="{Binding Editors[2].Summary}" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,1,0,0" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <ui:Button Content="Import file…" Tag="BlockedIps" Click="ImportFamily_Click" Margin="0,0,6,0"
+                                               ToolTip="Load a rule-list file into this editor — you still review and Save." />
                                     <ui:Button Content="Enable &amp; wire" Tag="BlockedIps" Click="EnableFamily_Click" Margin="0,0,6,0" />
                                     <ui:Button Content="Revert" Click="FamilyRevert_Click"
                                                IsEnabled="{Binding Editors[2].IsDirty}" Margin="0,0,6,0" />
@@ -392,6 +409,8 @@
                                     <TextBlock Text="{Binding Editors[3].Summary}" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,1,0,0" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <ui:Button Content="Import file…" Tag="AllowedIps" Click="ImportFamily_Click" Margin="0,0,6,0"
+                                               ToolTip="Load a rule-list file into this editor — you still review and Save." />
                                     <ui:Button Content="Enable &amp; wire" Tag="AllowedIps" Click="EnableFamily_Click" Margin="0,0,6,0" />
                                     <ui:Button Content="Revert" Click="FamilyRevert_Click"
                                                IsEnabled="{Binding Editors[3].IsDirty}" Margin="0,0,6,0" />
@@ -441,6 +460,8 @@
                                     <TextBlock Text="{Binding Editors[4].Summary}" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,1,0,0" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <ui:Button Content="Import file…" Tag="Cloaking" Click="ImportFamily_Click" Margin="0,0,6,0"
+                                               ToolTip="Load a rule-list file into this editor — you still review and Save." />
                                     <ui:Button Content="Enable &amp; wire" Tag="Cloaking" Click="EnableFamily_Click" Margin="0,0,6,0" />
                                     <ui:Button Content="Revert" Click="FamilyRevert_Click"
                                                IsEnabled="{Binding Editors[4].IsDirty}" Margin="0,0,6,0" />
@@ -492,6 +513,8 @@
                                                FontSize="10" Foreground="#b25e09" Margin="0,1,0,0" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <ui:Button Content="Import file…" Tag="Forwarding" Click="ImportFamily_Click" Margin="0,0,6,0"
+                                               ToolTip="Load a rule-list file into this editor — you still review and Save." />
                                     <ui:Button Content="Enable &amp; wire" Tag="Forwarding" Click="EnableFamily_Click" Margin="0,0,6,0" />
                                     <ui:Button Content="Revert" Click="FamilyRevert_Click"
                                                IsEnabled="{Binding Editors[5].IsDirty}" Margin="0,0,6,0" />

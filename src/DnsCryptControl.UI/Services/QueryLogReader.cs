@@ -38,12 +38,12 @@ public sealed class QueryLogReader : IQueryLogReader
         _path = queryLogPath ?? UiPaths.QueryLogFile;
     }
 
-    /// <summary>A sane upper bound on a single drain, symmetric with the rule-file reader's cap and the
-    /// 1 MiB per-request transport cap: at one drain per poll interval the log cannot legitimately grow
-    /// this large between ticks, so a file past the bound is treated as hostile and drops the read for
-    /// this tick (still truncating, so it self-heals) rather than buffering an unbounded string. The
-    /// dropped burst is signalled with <see cref="DrainedQueries.HadReadError"/> so the VM can surface a
-    /// "dropped a burst" indication rather than a silent gap (not a false clean drain).</summary>
+    /// <summary>A sane upper bound on a single drain, justified on the drain's OWN terms: it is a
+    /// per-poll-interval bound, and 8 MiB is thousands of times what the proxy can legitimately append
+    /// to the log in one ~750 ms interval, so a file past the bound is treated as hostile and drops the
+    /// read for this tick (still truncating, so it self-heals) rather than buffering an unbounded
+    /// string. The dropped burst is signalled with <see cref="DrainedQueries.HadReadError"/> so the VM
+    /// can surface a "dropped a burst" indication rather than a silent gap (not a false clean drain).</summary>
     private const long MaxDrainBytes = 8L * 1024 * 1024;
 
     public DrainedQueries Drain()

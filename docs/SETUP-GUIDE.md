@@ -251,14 +251,15 @@ In the **Filtering** tab, find the **Blocked names** card and:
 1. Click **Enable & wire** first — this creates the rule file and points the proxy at it.
    (Without this step the list exists but is never consulted; the card's banner tells you
    which state you're in.)
-2. Paste your blocklist into the editor — one domain pattern per line, in the
-   **wildcard‑domains** format shown below — then click **Save**.
+2. Add your blocklist — one domain pattern per line, in the **wildcard‑domains** format
+   shown below — then click **Save**. For a short list, paste it into the editor. For a big
+   downloaded list, click **Import file…** on the card and pick the file instead of pasting.
 
-> **Size note (v1.2.6):** very large lists — like the full official DNSCrypt aggregate at
-> ~9 MB — exceed the current 1 MiB per‑save limit and can make the editor unresponsive on
-> paste. Pick a compact list for now (HaGeZi *Light* or OISD *small* are good choices).
-> The next release lifts the limit to 16 MiB and adds an **Import file…** button so big
-> lists load without pasting at all.
+> **Big lists:** a single save can carry up to **16 MiB** — enough for the full official
+> DNSCrypt aggregate (~9 MB). Past about 1 MB the editor stops listing the rules line by
+> line (that is what kept the window responsive) and shows a size summary instead; the
+> list still saves and filters normally. *(v1.2.6 and older: the limit was 1 MiB and there
+> was no Import button — use a compact list such as HaGeZi Light or OISD small.)*
 
 These are the widely used, community‑maintained lists the DNSCrypt project points to:
 

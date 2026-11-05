@@ -1,4 +1,6 @@
 using DnsCryptControl.Core.QueryLog;
+using DnsCryptControl.Ipc.Commands;
+using DnsCryptControl.UI.Models;
 using DnsCryptControl.UI.Services;
 using DnsCryptControl.UI.ViewModels;
 
@@ -103,16 +105,60 @@ public class QueryMonitorViewModelTests
         public void Fire() => Tick?.Invoke(this, EventArgs.Empty);
     }
 
+    private sealed class FakeUiStateStore : IUiStateStore
+    {
+        public UiState ToLoad { get; set; } = new();
+        public UiState Saved { get; private set; } = new();
+        public int SaveCount { get; private set; }
+
+        public UiState Load() => ToLoad;
+
+        public void Save(UiState state)
+        {
+            Saved = state;
+            SaveCount++;
+        }
+    }
+
+    /// <summary>Scriptable per-tick attribution seam (v1.3.0): each fetch dequeues one scripted
+    /// batch (falling back to <see cref="NextBatch"/> — default null, i.e. the degraded/no-data
+    /// case, so pre-existing tests exercise the honest "—" path) and records the afterSeq cursor.
+    /// Always a completed Task, so ticks stay synchronous end-to-end (zero wall-clock waits).</summary>
+    private sealed class FakeAttributionReader : IDnsAttributionReader
+    {
+        public Queue<DnsAttributionBatch?> BatchQueue { get; } = new();
+        public DnsAttributionBatch? NextBatch { get; set; }
+        public List<long> FetchCalls { get; } = new();
+
+        public Task<DnsAttributionBatch?> FetchAsync(long afterSeq, CancellationToken ct)
+        {
+            FetchCalls.Add(afterSeq);
+            var batch = BatchQueue.Count > 0 ? BatchQueue.Dequeue() : NextBatch;
+            return Task.FromResult(batch);
+        }
+
+        public void Enqueue(long lastSeq, params DnsAttributionEntry[] entries) =>
+            BatchQueue.Enqueue(new DnsAttributionBatch(lastSeq, entries));
+    }
+
     private sealed class Harness : IDisposable
     {
         public FakeConfigFileService Config { get; } = new();
         public FakeQueryLogReader Reader { get; } = new();
         public FakeQueryPoller Poller { get; } = new();
+        public FakeUiStateStore UiState { get; } = new();
+        public FakeAttributionReader Attribution { get; } = new();
         public QueryMonitorViewModel Vm { get; }
 
-        public Harness()
+        public Harness(UiState? initialUiState = null)
         {
-            Vm = new QueryMonitorViewModel(Config, Reader, Poller, new SynchronousDispatcher());
+            if (initialUiState is not null)
+            {
+                UiState.ToLoad = initialUiState;
+            }
+
+            Vm = new QueryMonitorViewModel(
+                Config, Reader, Poller, new SynchronousDispatcher(), UiState, Attribution);
         }
 
         public void Dispose() => Vm.Dispose();
@@ -121,6 +167,112 @@ public class QueryMonitorViewModelTests
     private static QueryLogLine Line(
         string name, QueryAction action = QueryAction.Pass, string type = "A", string time = "[2026-07-03 10:24:59]") =>
         new(time, "127.0.0.1", name, type, action, 12, action is QueryAction.Pass ? "cloudflare" : "-", "-");
+
+    // ------------------------------------------------------------------ column layout (resizable headers)
+
+    [Fact]
+    public void ctor_seeds_column_widths_from_persisted_state()
+    {
+        using var h = new Harness(new UiState
+        {
+            QueryMonitorColumns = new UiQueryMonitorColumns { Time = 100, Type = 40, Action = 90, Latency = 70, Server = 300, App = 130 },
+        });
+
+        Assert.Equal(100, h.Vm.TimeColumnWidth);
+        Assert.Equal(40, h.Vm.TypeColumnWidth);
+        Assert.Equal(90, h.Vm.ActionColumnWidth);
+        Assert.Equal(70, h.Vm.LatencyColumnWidth);
+        Assert.Equal(300, h.Vm.ServerColumnWidth);
+        Assert.Equal(130, h.Vm.AppColumnWidth);
+    }
+
+    [Fact]
+    public void ctor_clamps_hand_edited_widths_to_the_grabbable_range()
+    {
+        // A hand-edited ui-state.json must never produce an ungrabbable (0-width) or runaway column.
+        using var h = new Harness(new UiState
+        {
+            QueryMonitorColumns = new UiQueryMonitorColumns { Time = 0, Type = -50, Action = 5000, Latency = double.NaN, Server = double.PositiveInfinity, App = -1 },
+        });
+
+        Assert.Equal(QueryMonitorViewModel.MinColumnWidth, h.Vm.TimeColumnWidth);
+        Assert.Equal(QueryMonitorViewModel.MinColumnWidth, h.Vm.TypeColumnWidth);
+        Assert.Equal(QueryMonitorViewModel.MaxColumnWidth, h.Vm.ActionColumnWidth);
+        Assert.Equal(QueryMonitorViewModel.MinColumnWidth, h.Vm.LatencyColumnWidth);
+        Assert.Equal(QueryMonitorViewModel.MinColumnWidth, h.Vm.ServerColumnWidth);
+        Assert.Equal(QueryMonitorViewModel.MinColumnWidth, h.Vm.AppColumnWidth);
+    }
+
+    [Fact]
+    public void app_column_resizes_clamps_and_persists_like_the_others()
+    {
+        // v1.3.0: the App column is a full member of the resizable-column set — same clamp arms,
+        // same commit path.
+        using var h = new Harness();
+        var start = h.Vm.AppColumnWidth;
+
+        h.Vm.ResizeColumn(QueryMonitorColumn.App, 30);
+        Assert.Equal(start + 30, h.Vm.AppColumnWidth);
+
+        h.Vm.ResizeColumn(QueryMonitorColumn.App, -10_000);
+        Assert.Equal(QueryMonitorViewModel.MinColumnWidth, h.Vm.AppColumnWidth);
+
+        h.Vm.CommitColumnWidths();
+        Assert.Equal(1, h.UiState.SaveCount);
+        Assert.Equal(h.Vm.AppColumnWidth, h.UiState.Saved.QueryMonitorColumns.App);
+    }
+
+    [Fact]
+    public void resize_column_applies_the_delta_and_clamps_at_both_ends()
+    {
+        using var h = new Harness();
+        var start = h.Vm.ServerColumnWidth;
+
+        h.Vm.ResizeColumn(QueryMonitorColumn.Server, 40);
+        Assert.Equal(start + 40, h.Vm.ServerColumnWidth);
+
+        h.Vm.ResizeColumn(QueryMonitorColumn.Server, -10_000);
+        Assert.Equal(QueryMonitorViewModel.MinColumnWidth, h.Vm.ServerColumnWidth);
+
+        h.Vm.ResizeColumn(QueryMonitorColumn.Server, 10_000);
+        Assert.Equal(QueryMonitorViewModel.MaxColumnWidth, h.Vm.ServerColumnWidth);
+
+        // No persistence during the drag — only CommitColumnWidths (drag end) saves.
+        Assert.Equal(0, h.UiState.SaveCount);
+    }
+
+    [Fact]
+    public void commit_column_widths_persists_the_current_widths_once()
+    {
+        using var h = new Harness();
+        h.Vm.ResizeColumn(QueryMonitorColumn.Server, 60);
+        h.Vm.ResizeColumn(QueryMonitorColumn.Time, -20);
+
+        h.Vm.CommitColumnWidths();
+
+        Assert.Equal(1, h.UiState.SaveCount);
+        Assert.Equal(h.Vm.ServerColumnWidth, h.UiState.Saved.QueryMonitorColumns.Server);
+        Assert.Equal(h.Vm.TimeColumnWidth, h.UiState.Saved.QueryMonitorColumns.Time);
+    }
+
+    [Fact]
+    public void commit_column_widths_does_not_clobber_other_persisted_preferences()
+    {
+        // Commit loads FRESH state and replaces only the column block — the favorites, theme, and the
+        // kill-switch opt-in another VM persisted must survive a width save from this one.
+        using var h = new Harness(new UiState
+        {
+            Favorites = { "quad9-dnscrypt-ip4-filter-pri" },
+            Theme = "Dark",
+            KillSwitchOptIn = true,
+        });
+
+        h.Vm.CommitColumnWidths();
+
+        Assert.Equal(new[] { "quad9-dnscrypt-ip4-filter-pri" }, h.UiState.Saved.Favorites);
+        Assert.Equal("Dark", h.UiState.Saved.Theme);
+        Assert.True(h.UiState.Saved.KillSwitchOptIn);
+    }
 
     // ------------------------------------------------------------------ off by default (IC-QM1)
 
@@ -685,6 +837,188 @@ public class QueryMonitorViewModelTests
         Assert.Equal(0, session.Stats.Queries);
     }
 
+    // ------------------------------------------------------------------ per-app attribution (v1.3.0)
+
+    [Fact]
+    public async Task row_with_a_matching_attribution_gets_the_process_name_normalized()
+    {
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        // The ETW spelling is FQDN-dotted + differently cased — normalization must still match.
+        h.Attribution.Enqueue(1, Entry(1, "ADS.Example.COM.", pid: 100, processName: "chrome"));
+        h.Reader.Enqueue(Line("ads.example.com"));
+        h.Poller.Fire();
+
+        Assert.Equal("chrome", Assert.Single(h.Vm.Rows).App);
+    }
+
+    [Fact]
+    public async Task row_with_no_matching_attribution_shows_the_honest_unknown()
+    {
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        h.Attribution.Enqueue(1, Entry(1, "other.example", pid: 100, processName: "chrome"));
+        h.Reader.Enqueue(Line("unrelated.example"));
+        h.Poller.Fire();
+
+        Assert.Equal(QueryMonitorViewModel.UnknownAppLabel, Assert.Single(h.Vm.Rows).App);
+    }
+
+    [Fact]
+    public async Task two_distinct_processes_in_the_window_show_multiple_never_a_guess()
+    {
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        // Two PIDs — even with the SAME image name — make the row ambiguous (IC-16: never guess).
+        h.Attribution.Enqueue(2,
+            Entry(1, "shared.example", pid: 100, processName: "chrome"),
+            Entry(2, "shared.example", pid: 200, processName: "chrome"));
+        h.Reader.Enqueue(Line("shared.example"));
+        h.Poller.Fire();
+
+        Assert.Equal(QueryMonitorViewModel.MultipleAppsLabel, Assert.Single(h.Vm.Rows).App);
+    }
+
+    [Fact]
+    public async Task attribution_fetch_failure_degrades_to_unknown_and_never_throws()
+    {
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        // The reader's default (NextBatch = null) IS the degraded transport: the tick must still
+        // drain, append, and label honestly.
+        h.Reader.Enqueue(Line("a.example"));
+        h.Poller.Fire(); // must not throw
+
+        Assert.Equal(QueryMonitorViewModel.UnknownAppLabel, Assert.Single(h.Vm.Rows).App);
+        Assert.Single(h.Attribution.FetchCalls); // the fetch DID run — its failure just degraded
+    }
+
+    [Fact]
+    public async Task exited_process_with_no_name_falls_back_to_the_bare_pid()
+    {
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        h.Attribution.Enqueue(1, Entry(1, "gone.example", pid: 1234, processName: null));
+        h.Reader.Enqueue(Line("gone.example"));
+        h.Poller.Fire();
+
+        Assert.Equal("PID 1234", Assert.Single(h.Vm.Rows).App);
+    }
+
+    [Fact]
+    public async Task stale_attribution_outside_the_window_does_not_claim_a_fresh_query()
+    {
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        // Same name, but captured 10 s ago — retained (< 30 s) yet outside the ±5 s window, so a
+        // long-gone lookup can never label a fresh query.
+        h.Attribution.Enqueue(1, Entry(1, "old.example", pid: 100, processName: "chrome", unixMs: NowMs() - 10_000));
+        h.Reader.Enqueue(Line("old.example"));
+        h.Poller.Fire();
+
+        Assert.Equal(QueryMonitorViewModel.UnknownAppLabel, Assert.Single(h.Vm.Rows).App);
+    }
+
+    [Fact]
+    public async Task attribution_cursor_advances_by_the_batch_LastSeq_each_tick()
+    {
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        h.Attribution.Enqueue(7, Entry(7, "a.example", pid: 100, processName: "chrome"));
+        h.Reader.Enqueue(Line("a.example"));
+        h.Poller.Fire();
+
+        h.Reader.Enqueue(Line("b.example"));
+        h.Poller.Fire(); // second fetch (unscripted default: empty batch is fine)
+
+        Assert.Equal(2, h.Attribution.FetchCalls.Count);
+        Assert.Equal(0, h.Attribution.FetchCalls[0]);  // first poll starts from the beginning
+        Assert.Equal(7, h.Attribution.FetchCalls[1]);  // then resumes after the last seen seq
+    }
+
+    [Fact]
+    public async Task attribution_merged_on_an_earlier_tick_still_correlates_a_row_arriving_the_next_tick()
+    {
+        // The ETW event fires when the app CALLS the resolver; the proxy log line lands up to a
+        // poll later. A candidate merged on tick N must still match a row appended on tick N+1
+        // (both inside the ±5 s window).
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        h.Attribution.Enqueue(1, Entry(1, "lag.example", pid: 100, processName: "firefox"));
+        h.Poller.Fire(); // merge only — nothing drained this tick
+
+        h.Reader.Enqueue(Line("lag.example"));
+        h.Poller.Fire(); // the row arrives one tick later
+
+        Assert.Equal("firefox", Assert.Single(h.Vm.Rows).App);
+    }
+
+    [Fact]
+    public async Task disable_clears_the_attribution_lookup_and_rewinds_the_cursor()
+    {
+        // OPSEC residue (FIX D): the domain→process lookup is pruned only on poller ticks, so
+        // "Stop & clear" must drop it explicitly — otherwise the final ~30 s of pairs sit in
+        // memory for the rest of the app session after the ticks stop. A fresh consent also
+        // starts a fresh cursor (the helper's ring is cleared when its capture session stops).
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        h.Attribution.Enqueue(3, Entry(3, "residue.example", pid: 100, processName: "chrome"));
+        h.Reader.Enqueue(Line("residue.example"));
+        h.Poller.Fire();
+        Assert.Equal(1, h.Vm.AttributionLookupCount);
+
+        h.Config.LoadQueue.Enqueue(ConfigLoadResult.Ok("[query_log]\nfile = 'x'\n", Sha));
+        await h.Vm.DisableAsync(CancellationToken.None);
+
+        Assert.Equal(0, h.Vm.AttributionLookupCount); // no domain→process residue survives the stop
+
+        // The rewound cursor: a re-enabled session's first fetch starts from 0, not the old seq.
+        h.Config.LoadQueue.Enqueue(ConfigLoadResult.Ok(string.Empty, Sha));
+        h.Vm.RequestEnable();
+        await h.Vm.ConfirmEnableAsync(CancellationToken.None);
+        h.Poller.Fire();
+
+        Assert.Equal(0, h.Attribution.FetchCalls[^1]);
+    }
+
+    [Fact]
+    public async Task clear_view_drops_the_attribution_lookup_with_the_rows()
+    {
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        h.Attribution.Enqueue(1, Entry(1, "residue.example", pid: 100, processName: "chrome"));
+        h.Reader.Enqueue(Line("residue.example"));
+        h.Poller.Fire();
+        Assert.Equal(1, h.Vm.AttributionLookupCount);
+
+        h.Vm.ClearView();
+
+        Assert.Empty(h.Vm.Rows);
+        Assert.Equal(0, h.Vm.AttributionLookupCount); // the lookup is the same residue, one join away
+    }
+
+    [Fact]
+    public void no_attribution_fetch_while_logging_is_off()
+    {
+        // The polls are the helper's demand signal for machine-wide ETW capture — a tick that
+        // somehow fires while logging is off must NOT poll (no unconsented demand).
+        using var h = new Harness();
+
+        h.Poller.Fire();
+
+        Assert.Empty(h.Attribution.FetchCalls);
+    }
+
     // ------------------------------------------------------------------ helpers
 
     /// <summary>Enables logging (consent + confirm) and activates the tab, leaving the poller running.</summary>
@@ -695,4 +1029,11 @@ public class QueryMonitorViewModelTests
         h.Vm.RequestEnable();
         await h.Vm.ConfirmEnableAsync(CancellationToken.None);
     }
+
+    private static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+    /// <summary>A wire attribution entry stamped NOW unless a test needs it stale.</summary>
+    private static DnsAttributionEntry Entry(
+        long seq, string name, int pid, string? processName, long? unixMs = null) =>
+        new(seq, unixMs ?? NowMs(), pid, name, processName);
 }

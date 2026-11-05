@@ -133,6 +133,15 @@ internal static class ServiceComposition
         // mirrored check is UX only and never replaces it).
         services.AddSingleton<IConfigWritePolicy, ProtectionAwareConfigWritePolicy>();
 
+        // v1.3.0 per-app attribution: ONE watcher instance wears three hats — the concrete
+        // singleton, the IDnsAttributionSource the GetDnsAttributions handler reads (which is
+        // also the demand signal that starts its ETW session), and a hosted service registered
+        // ONLY so host shutdown tears the ETW session down deterministically (StartAsync is a
+        // no-op; capture is demand-gated by the UI's polls, never boot-started).
+        services.AddSingleton<DnsAttributionWatcher>();
+        services.AddSingleton<IDnsAttributionSource>(sp => sp.GetRequiredService<DnsAttributionWatcher>());
+        services.AddHostedService(sp => sp.GetRequiredService<DnsAttributionWatcher>());
+
         services.AddSingleton(sp => new CommandDispatcher(HandlerRegistry.Build(
             sp.GetRequiredService<IProxyServiceController>(),
             sp.GetRequiredService<IConfigStore>(),
@@ -145,7 +154,8 @@ internal static class ServiceComposition
             sp.GetRequiredService<IProtectionStateWriter>(),
             sp.GetRequiredService<IBinaryVerifyInstaller>(),
             sp.GetRequiredService<IProtectionOrchestrator>(),
-            sp.GetRequiredService<IConfigWritePolicy>())));
+            sp.GetRequiredService<IConfigWritePolicy>(),
+            sp.GetRequiredService<IDnsAttributionSource>())));
 
         services.AddSingleton(sp => new IpcPipeServer(
             sp.GetRequiredService<CommandDispatcher>(),

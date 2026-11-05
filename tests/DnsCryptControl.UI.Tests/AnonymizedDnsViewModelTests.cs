@@ -134,6 +134,22 @@ public class AnonymizedDnsViewModelTests
         Snapshot("relays", new[] { Entry("anon-relay", DnsCryptRelayStamp()) }),
     };
 
+    /// <summary>Two DNSCrypt servers + TWO DNSCrypt relays — the multi-relay chip-adder needs at least
+    /// two distinct relay candidates to prove ordering, dedupe, and the no-drop edit round-trip.</summary>
+    private static ResolverListSnapshot[] TwoRelayLists() => new[]
+    {
+        Snapshot("public-resolvers", new[]
+        {
+            Entry("cloudflare", DnsCryptStamp()),
+            Entry("quad9", DnsCryptStamp()),
+        }),
+        Snapshot("relays", new[]
+        {
+            Entry("relay-a", DnsCryptRelayStamp()),
+            Entry("relay-b", DnsCryptRelayStamp("6.7.8.9")),
+        }),
+    };
+
     private sealed record Harness(
         AnonymizedDnsViewModel Vm,
         FakeConfigFileService File,
@@ -395,6 +411,152 @@ public class AnonymizedDnsViewModelTests
         Assert.Equal(new[] { "*" }, h.Vm.AddViaCandidates);
         Assert.NotNull(h.Vm.AddViaEmptyHint);
         Assert.Contains("DNSCrypt relays", h.Vm.AddViaEmptyHint!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ---- multi-relay chip-adder (AddViaSelection: dnscrypt-proxy picks ONE staged relay at random
+    //      per cert-refresh cycle, so an N-relay via is diversity/failover the single combo couldn't build) ----
+
+    [Fact]
+    public async Task add_via_relay_trims_and_dedupes_case_insensitively()
+    {
+        var h = await LoadedAsync(""); // StandardLists: 'anon-relay' is a via candidate at load
+
+        Assert.True(h.Vm.AddViaRelay("  anon-relay  "));
+        Assert.True(h.Vm.AddViaRelay("ANON-RELAY"));   // same relay, different case → already staged (true, not re-added)
+
+        // One chip, canonicalized to the candidate's exact casing (the proxy matches names exactly).
+        Assert.Equal(new[] { "anon-relay" }, h.Vm.AddViaSelection);
+    }
+
+    [Fact]
+    public async Task add_via_relay_wildcard_is_exclusive_in_both_directions()
+    {
+        var h = await LoadedAsync("", TwoRelayLists());
+
+        h.Vm.AddViaRelay("relay-a");
+        h.Vm.AddViaRelay("relay-b");
+        h.Vm.AddViaRelay("*");            // '*' already covers every relay — staging it clears the named ones…
+        Assert.Equal(new[] { "*" }, h.Vm.AddViaSelection);
+
+        h.Vm.AddViaRelay("relay-a");      // …and staging a named relay drops '*' again
+        Assert.Equal(new[] { "relay-a" }, h.Vm.AddViaSelection);
+    }
+
+    [Fact]
+    public async Task add_via_relay_accepts_exactly_what_the_quick_path_accepts_and_reports_refusals()
+    {
+        // FIX M: the chip-adder and the single-relay quick path accept IDENTICAL inputs (IsValidVia)
+        // — the quick path takes a bare relay name that is not in the cached candidate lists, so
+        // "+ Add relay" must stage it too rather than silently refuse it. The bool return drives the
+        // view: it clears the combo only on true, keeping a refused value's text for the user to fix.
+        var h = await LoadedAsync("");
+
+        Assert.False(h.Vm.AddViaRelay(null));
+        Assert.False(h.Vm.AddViaRelay("   "));
+        Assert.False(h.Vm.AddViaRelay("evil name!; drop")); // an invalid shape both paths refuse
+        Assert.Empty(h.Vm.AddViaSelection);
+
+        Assert.True(h.Vm.AddViaRelay("not-a-listed-relay")); // a valid bare NAME — stageable like the quick path
+        Assert.Equal(new[] { "not-a-listed-relay" }, h.Vm.AddViaSelection);
+    }
+
+    [Fact]
+    public async Task remove_via_relay_removes_only_that_chip()
+    {
+        var h = await LoadedAsync("", TwoRelayLists());
+
+        h.Vm.AddViaRelay("relay-a");
+        h.Vm.AddViaRelay("relay-b");
+        h.Vm.RemoveViaRelay("relay-a");
+
+        Assert.Equal(new[] { "relay-b" }, h.Vm.AddViaSelection);
+    }
+
+    [Fact]
+    public async Task add_route_with_two_staged_relays_produces_a_row_with_both_in_order()
+    {
+        var h = await LoadedAsync("", TwoRelayLists());
+
+        h.Vm.AddViaRelay("relay-a");
+        h.Vm.AddViaRelay("relay-b");
+        h.Vm.AddRoute("cloudflare", h.Vm.AddViaSelection.ToList());
+
+        var row = Assert.Single(h.Vm.Routes);
+        Assert.Equal(new[] { "relay-a", "relay-b" }, row.Via);
+        Assert.Empty(h.Vm.AddViaSelection); // a successful add consumes the staged chips
+    }
+
+    [Fact]
+    public async Task a_refused_add_route_keeps_the_staged_relay_chips()
+    {
+        var h = await LoadedAsync("", TwoRelayLists());
+
+        h.Vm.AddViaRelay("relay-a");
+        h.Vm.AddRoute("evil name!; drop", h.Vm.AddViaSelection.ToList());
+
+        Assert.NotNull(h.Vm.AddRouteError);
+        Assert.Equal(new[] { "relay-a" }, h.Vm.AddViaSelection); // still staged — fix the value and retry
+    }
+
+    [Fact]
+    public async Task edit_seed_round_trip_of_a_multi_via_route_drops_no_relay()
+    {
+        // The old single-combo Edit seeded only via[0], silently dropping relays 2..N on re-add. The Edit
+        // flow now seeds the FULL via into the chip list; re-adding from it must preserve every relay.
+        var config = "[anonymized_dns]\nroutes = [ { server_name = 'cloudflare', via = ['relay-a', 'relay-b'] } ]\n";
+        var h = await LoadedAsync(config, TwoRelayLists());
+        var row = Assert.Single(h.Vm.Routes);
+        Assert.Equal(new[] { "relay-a", "relay-b" }, row.Via);
+
+        h.Vm.SetBuilderServer(row.ServerName);   // what EditRoute_Click does first (repoints candidates)
+        h.Vm.SeedViaSelection(row.Via);          // then seeds the full via list
+        Assert.Equal(new[] { "relay-a", "relay-b" }, h.Vm.AddViaSelection);
+
+        h.Vm.AddRoute(row.ServerName, h.Vm.AddViaSelection.ToList()); // "Add route" replaces the row
+        var edited = Assert.Single(h.Vm.Routes);
+        Assert.Equal(new[] { "relay-a", "relay-b" }, edited.Via);
+    }
+
+    [Fact]
+    public async Task seed_via_selection_keeps_relays_that_are_not_candidates()
+    {
+        // On-disk via entries may not be in any cached list (hand-added names or stamps). Seeding copies
+        // VERBATIM — gating on candidates here would silently drop relays on edit, the exact bug fixed.
+        var h = await LoadedAsync("");
+
+        h.Vm.SeedViaSelection(new[] { "hand-added-relay", "anon-relay" });
+
+        Assert.Equal(new[] { "hand-added-relay", "anon-relay" }, h.Vm.AddViaSelection);
+    }
+
+    [Fact]
+    public async Task changing_the_builder_server_clears_the_staged_chips_but_reasserting_it_keeps_them()
+    {
+        var h = await LoadedAsync("", TwoRelayLists());
+
+        h.Vm.SetBuilderServer("cloudflare");
+        h.Vm.AddViaRelay("relay-a");
+        h.Vm.SetBuilderServer("cloudflare");   // same server re-asserted (the Edit flow) — chips survive
+        Assert.Equal(new[] { "relay-a" }, h.Vm.AddViaSelection);
+
+        h.Vm.SetBuilderServer("quad9");        // a genuine change — an old-proto chip could pair a mismatch
+        Assert.Empty(h.Vm.AddViaSelection);
+    }
+
+    [Fact]
+    public async Task reload_clears_the_staged_relay_chips()
+    {
+        // Chips are pre-add BUILDER state, not config state (staging one does not dirty the tab),
+        // so a reload/revert resets them alongside the rest of the builder.
+        var h = await LoadedAsync("", TwoRelayLists());
+        h.Vm.AddViaRelay("relay-a");
+        Assert.Single(h.Vm.AddViaSelection);
+        Assert.False(h.Vm.IsDirty);
+
+        h.File.NextLoad = ConfigLoadResult.Ok("", Sha2);
+        await h.Vm.LoadAsync(CancellationToken.None);
+
+        Assert.Empty(h.Vm.AddViaSelection);
     }
 
     // ---- Resolvers "Route through a relay" shortcut (PendingRouteServer) ----

@@ -36,6 +36,30 @@ public sealed class UiState
     /// on the very first Protect; the user's explicit toggle is persisted here and wins on later launches.
     /// A file written by an older build without this field deserializes to the <c>true</c> default.</summary>
     public bool KillSwitchOptIn { get; set; } = true;
+
+    /// <summary>Query Monitor column widths (px), adjusted by dragging the header dividers. Cosmetic
+    /// only; the VM clamps on load so a hand-edited file can never push a column off-screen.</summary>
+    public UiQueryMonitorColumns QueryMonitorColumns { get; set; } = new();
+}
+
+/// <summary>Pixel widths for the Query Monitor's six fixed columns (the Name column is star-sized
+/// and absorbs the remainder). Defaults match the shipped layout; Server is wide enough for the
+/// long public resolver names (e.g. <c>quad9-dnscrypt-ip4-filter-pri</c>) out of the box. A file
+/// written by a pre-App build deserializes App to its default (the VM clamps on load anyway).</summary>
+public sealed class UiQueryMonitorColumns
+{
+    public double Time { get; set; } = 150;
+
+    public double Type { get; set; } = 52;
+
+    public double Action { get; set; } = 82;
+
+    public double Latency { get; set; } = 64;
+
+    public double Server { get; set; } = 220;
+
+    /// <summary>The originating-app column (v1.3.0 per-app attribution), between Server and Name.</summary>
+    public double App { get; set; } = 110;
 }
 
 /// <summary>A serializable anonymized-DNS route (mirrors <c>Core.AnonymizedDns.AnonRoute</c>).</summary>

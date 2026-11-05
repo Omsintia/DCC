@@ -16,22 +16,32 @@
 
         <!-- One row in the live query stream: time, type, action (colour-coded by Severity), duration,
              server, and the queried name. The action severity drives the colour so the view never
-             re-classifies (QueryRowViewModel.Severity is the single source, mirroring 5d's RuleRow). -->
+             re-classifies (QueryRowViewModel.Severity is the single source, mirroring 5d's RuleRow).
+             Cell WIDTHS bind the page VM's *ColumnWidth geometry (via the hosting ItemsControl's
+             DataContext — the row's own DataContext is the row VM), so dragging a header divider
+             realigns every row live. Columns are Auto and size to their fixed-width cell. -->
         <DataTemplate x:Key="QueryRowTemplate" DataType="{x:Type vm:QueryRowViewModel}">
             <Grid Margin="0,1">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="150" />
-                    <ColumnDefinition Width="52" />
-                    <ColumnDefinition Width="82" />
-                    <ColumnDefinition Width="64" />
-                    <ColumnDefinition Width="120" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
                 <TextBlock Grid.Column="0" Text="{Binding Time}" FontFamily="Consolas" FontSize="11"
+                           Width="{Binding DataContext.TimeColumnWidth, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                           TextTrimming="CharacterEllipsis"
                            Foreground="{DynamicResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
                 <TextBlock Grid.Column="1" Text="{Binding Type}" FontFamily="Consolas" FontSize="11"
+                           Width="{Binding DataContext.TypeColumnWidth, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                           TextTrimming="CharacterEllipsis"
                            Foreground="{DynamicResource TextFillColorPrimaryBrush}" VerticalAlignment="Center" />
                 <TextBlock Grid.Column="2" Text="{Binding ActionLabel}" FontFamily="Consolas" FontSize="11"
+                           Width="{Binding DataContext.ActionColumnWidth, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                           TextTrimming="CharacterEllipsis"
                            FontWeight="SemiBold" VerticalAlignment="Center">
                     <TextBlock.Style>
                         <Style TargetType="TextBlock">
@@ -48,14 +58,28 @@
                     </TextBlock.Style>
                 </TextBlock>
                 <TextBlock Grid.Column="3" Text="{Binding DurationMs, StringFormat={}{0} ms}"
+                           Width="{Binding DataContext.LatencyColumnWidth, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                           TextAlignment="Right" TextTrimming="CharacterEllipsis"
                            FontFamily="Consolas" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                           HorizontalAlignment="Right" Margin="0,0,8,0" VerticalAlignment="Center" />
+                           Margin="0,0,8,0" VerticalAlignment="Center" />
                 <TextBlock Grid.Column="4" Text="{Binding Server}" FontFamily="Consolas" FontSize="11"
+                           Width="{Binding DataContext.ServerColumnWidth, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
                            Foreground="{DynamicResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                <TextBlock Grid.Column="5" Text="{Binding Name}" FontFamily="Consolas" FontSize="12"
+                <!-- v1.3.0 per-app attribution: the originating app ("—" when unknown, "multiple" when
+                     ambiguous — the VM never guesses). Same fonts as Server. -->
+                <TextBlock Grid.Column="5" Text="{Binding App}" FontFamily="Consolas" FontSize="11"
+                           Width="{Binding DataContext.AppColumnWidth, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                <TextBlock Grid.Column="6" Text="{Binding Name}" FontFamily="Consolas" FontSize="12"
                            Foreground="{DynamicResource TextFillColorPrimaryBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
             </Grid>
         </DataTemplate>
+
+        <!-- The invisible-but-grabbable header divider: an 8px hit zone whose 1px right border is the
+             visible column separator. Tag carries the QueryMonitorColumn name the code-behind parses. -->
+        <ControlTemplate x:Key="ColumnDividerThumbTemplate" TargetType="Thumb">
+            <Border Background="Transparent" BorderBrush="#22808080" BorderThickness="0,0,1,0" />
+        </ControlTemplate>
 
         <!-- The consent gate (IC-QM2). Shown by the code-behind when the VM raises PendingLoggingConsent;
              Primary => ConfirmEnableAsync, anything else => CancelEnable. DataContext is set to the VM in
@@ -70,6 +94,8 @@
                            Text="Query logging records EVERY domain your device looks up — effectively your browsing history." />
                 <TextBlock TextWrapping="Wrap" Margin="0,8,0,0"
                            Text="Entries are stored only in this app's memory and shredded from disk after each read, in a per-user location no other account can read. Nothing is sent anywhere. Turn this off (Stop &amp; clear) when you are done." />
+                <TextBlock TextWrapping="Wrap" Margin="0,8,0,0"
+                           Text="While logging is on, the app also matches queries to the local process that made them (best-effort, in memory only, never written to disk)." />
                 <TextBlock TextWrapping="Wrap" Margin="0,8,0,0" FontFamily="Consolas" FontSize="11" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
                            Text="{Binding PendingLoggingConsent.LogPath}" />
             </StackPanel>
@@ -158,22 +184,63 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
+                <!-- Header. Each fixed cell = a bound-width label + a draggable divider Thumb at its right
+                     edge (DragDelta -> VM.ResizeColumn live; DragCompleted -> VM.CommitColumnWidths persists
+                     to ui-state.json). The rows bind the same VM widths, so header and stream stay aligned. -->
                 <Grid Grid.Row="0" Margin="8,6,8,4">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="150" />
-                        <ColumnDefinition Width="52" />
-                        <ColumnDefinition Width="82" />
-                        <ColumnDefinition Width="64" />
-                        <ColumnDefinition Width="120" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="Time" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Grid.Column="1" Text="Type" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Grid.Column="2" Text="Action" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Grid.Column="3" Text="Time (ms)" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                               HorizontalAlignment="Right" Margin="0,0,8,0" />
-                    <TextBlock Grid.Column="4" Text="Server" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Grid.Column="5" Text="Name" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <Grid Grid.Column="0">
+                        <TextBlock Width="{Binding TimeColumnWidth}" Text="Time" FontSize="11" FontWeight="SemiBold"
+                                   TextTrimming="CharacterEllipsis" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        <Thumb Tag="Time" Width="8" HorizontalAlignment="Right" Cursor="SizeWE"
+                               Template="{StaticResource ColumnDividerThumbTemplate}"
+                               DragDelta="ColumnThumb_DragDelta" DragCompleted="ColumnThumb_DragCompleted" />
+                    </Grid>
+                    <Grid Grid.Column="1">
+                        <TextBlock Width="{Binding TypeColumnWidth}" Text="Type" FontSize="11" FontWeight="SemiBold"
+                                   TextTrimming="CharacterEllipsis" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        <Thumb Tag="Type" Width="8" HorizontalAlignment="Right" Cursor="SizeWE"
+                               Template="{StaticResource ColumnDividerThumbTemplate}"
+                               DragDelta="ColumnThumb_DragDelta" DragCompleted="ColumnThumb_DragCompleted" />
+                    </Grid>
+                    <Grid Grid.Column="2">
+                        <TextBlock Width="{Binding ActionColumnWidth}" Text="Action" FontSize="11" FontWeight="SemiBold"
+                                   TextTrimming="CharacterEllipsis" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        <Thumb Tag="Action" Width="8" HorizontalAlignment="Right" Cursor="SizeWE"
+                               Template="{StaticResource ColumnDividerThumbTemplate}"
+                               DragDelta="ColumnThumb_DragDelta" DragCompleted="ColumnThumb_DragCompleted" />
+                    </Grid>
+                    <Grid Grid.Column="3">
+                        <TextBlock Width="{Binding LatencyColumnWidth}" Text="Time (ms)" FontSize="11" FontWeight="SemiBold"
+                                   TextAlignment="Right" TextTrimming="CharacterEllipsis" Margin="0,0,8,0"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        <Thumb Tag="Latency" Width="8" HorizontalAlignment="Right" Cursor="SizeWE"
+                               Template="{StaticResource ColumnDividerThumbTemplate}"
+                               DragDelta="ColumnThumb_DragDelta" DragCompleted="ColumnThumb_DragCompleted" />
+                    </Grid>
+                    <Grid Grid.Column="4">
+                        <TextBlock Width="{Binding ServerColumnWidth}" Text="Server" FontSize="11" FontWeight="SemiBold"
+                                   TextTrimming="CharacterEllipsis" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        <Thumb Tag="Server" Width="8" HorizontalAlignment="Right" Cursor="SizeWE"
+                               Template="{StaticResource ColumnDividerThumbTemplate}"
+                               DragDelta="ColumnThumb_DragDelta" DragCompleted="ColumnThumb_DragCompleted" />
+                    </Grid>
+                    <Grid Grid.Column="5">
+                        <TextBlock Width="{Binding AppColumnWidth}" Text="App" FontSize="11" FontWeight="SemiBold"
+                                   TextTrimming="CharacterEllipsis" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        <Thumb Tag="App" Width="8" HorizontalAlignment="Right" Cursor="SizeWE"
+                               Template="{StaticResource ColumnDividerThumbTemplate}"
+                               DragDelta="ColumnThumb_DragDelta" DragCompleted="ColumnThumb_DragCompleted" />
+                    </Grid>
+                    <TextBlock Grid.Column="6" Text="Name" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
                 </Grid>
                 <!-- 5g WP5: one-line legend for the action words a user will see in the stream. -->
                 <TextBlock Grid.Row="1" Margin="8,0,8,4"

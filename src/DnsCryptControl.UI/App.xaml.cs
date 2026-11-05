@@ -58,6 +58,10 @@ public partial class App : Application, IDisposable
             // marshals ticks onto the UI thread; nothing here touches the privileged wire (IC-2).
             builder.Services.AddSingleton<IQueryLogReader>(_ => new QueryLogReader());
             builder.Services.AddSingleton<IQueryPoller, PeriodicTimerQueryPoller>();
+            // v1.3.0 per-app attribution: the Query Monitor's App column reads the helper's ETW
+            // ring through this thin pipe seam; polling it is the demand signal that keeps the
+            // helper's (in-memory-only) capture alive, so it is only polled while logging is on.
+            builder.Services.AddSingleton<IDnsAttributionReader, DnsAttributionReader>();
             builder.Services.AddSingleton<ILogTailReader, LogTailReader>();
             // Phase 5f (Settings): theme applier, startup registration (HKCU Run), offline integrity reader.
             builder.Services.AddSingleton<IThemeApplier, WpfThemeApplier>();

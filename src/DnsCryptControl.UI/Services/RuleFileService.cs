@@ -3,6 +3,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using DnsCryptControl.Ipc;
+using DnsCryptControl.Ipc.Commands;
 using DnsCryptControl.Ipc.Serialization;
 using DnsCryptControl.Platform;
 
@@ -13,8 +14,9 @@ namespace DnsCryptControl.UI.Services;
 /// Reads mirror <see cref="ResolverListReader"/>: shared <c>FileShare.ReadWrite | FileShare.Delete</c>
 /// access so a read never fails just because the helper is atomically replacing the file
 /// mid-read (temp + Replace/Move), and fail-closed — any error becomes a typed
-/// <see cref="RuleFileState"/>, never a throw. Writes orchestrate the 1 MiB pre-check (IC-14)
-/// then the helper's unconditional <c>WriteRuleFile</c> verb (IC-13, no CAS), mapping the reply
+/// <see cref="RuleFileState"/>, never a throw. Writes orchestrate the version-skew gate, then
+/// the frame pre-check (IC-14) against <see cref="IpcSerializer.MaxBytes"/> (16 MiB), then the
+/// helper's unconditional <c>WriteRuleFile</c> verb (IC-13, no CAS), mapping the reply
 /// into a typed <see cref="RuleFileWriteOutcome"/> with verbatim helper messages (IC-10).
 /// </summary>
 public sealed class RuleFileService : IRuleFileService
@@ -89,14 +91,35 @@ public sealed class RuleFileService : IRuleFileService
         // component); this is the string HelperClient.WriteRuleFileAsync forwards.
         var kindName = kind.ToString();
 
-        // Step 1 — 1 MiB frame pre-check on the ACTUAL request bytes (IC-14). The transport
-        // fails closed on oversize too, but that surfaces as a lost reply — this gives the
-        // friendly outcome without touching the pipe. Mirrors ConfigFileService.cs:118-125.
+        // Step 0 — version-skew gate (mirrors ConfigFileService.SaveAndApplyAsync's Step 0). The
+        // v5 framing raise (1 MiB → 16 MiB) means an older helper's transport silently drops a
+        // legal large frame — a lost reply indistinguishable from a dead helper — so a mixed
+        // UI/helper pair must be refused BEFORE any WriteRuleFile frame is sent, with an
+        // actionable message instead of a confusing "helper did not reply".
+        var status = await _helper.GetStatusAsync(ct).ConfigureAwait(false);
+        if (status is null || !status.Success || status.Value is null)
+        {
+            return new RuleFileWriteOutcome(
+                RuleFileWriteOutcomeKind.HelperUnavailable,
+                "helper unavailable — the save was not attempted");
+        }
+
+        if (status.Value.ProtocolVersion != IpcProtocol.Version)
+        {
+            return new RuleFileWriteOutcome(
+                RuleFileWriteOutcomeKind.Rejected,
+                $"helper protocol version {status.Value.ProtocolVersion} does not match this app's ({IpcProtocol.Version}) — update the helper and app together, then retry");
+        }
+
+        // Step 1 — frame pre-check (IC-14) on the ACTUAL request bytes against
+        // IpcSerializer.MaxBytes (16 MiB). The transport fails closed on oversize too, but that
+        // surfaces as a lost reply — this gives the friendly outcome without touching the pipe.
+        // Mirrors ConfigFileService.cs:124-139.
         if (UiPaths.RuleFileTooLarge(kindName, content))
         {
             return new RuleFileWriteOutcome(
                 RuleFileWriteOutcomeKind.TooLarge,
-                "blocklist too large to send to the helper (limit 1 MiB per request) — split it, or reference it as an external file");
+                $"blocklist too large to send to the helper (limit {IpcSerializer.MaxBytes / 1_048_576} MiB per request) — split it, or reference it as an external file");
         }
 
         // Step 2 — the helper's unconditional (last-writer-wins, no CAS) validated write.
@@ -121,13 +144,12 @@ public sealed class RuleFileService : IRuleFileService
         catch (UnauthorizedAccessException) { return false; }
     }
 
-    /// <summary>A sane upper bound on a rule-file read, symmetric with the 1 MiB per-request WRITE
-    /// cap (<see cref="IpcSerializer.MaxBytes"/>). We allow a generous multiple so a legitimate
-    /// near-cap file still reads, while a pathologically large file (only plantable by something
-    /// already past the ACL trust boundary) fails closed to Unreadable rather than buffering an
-    /// unbounded string into memory — keeping the reader's "never throws" contract honest on
-    /// hostile input.</summary>
-    private const long MaxReadBytes = 8L * IpcSerializer.MaxBytes;
+    /// <summary>A sane upper bound on a rule-file read, symmetric with the per-request WRITE cap
+    /// (<see cref="IpcSerializer.MaxBytes"/>, 16 MiB since v5). 2× leaves a legitimate near-cap
+    /// file readable, while a pathologically large file (only plantable by something already past
+    /// the ACL trust boundary) fails closed to Unreadable rather than buffering an unbounded
+    /// string into memory — keeping the reader's "never throws" contract honest on hostile input.</summary>
+    private const long MaxReadBytes = 2L * IpcSerializer.MaxBytes;
 
     // Share ReadWrite | Delete: the helper replaces the file (temp + Replace/Move) on write;
     // without Delete sharing a concurrent read would throw. Mirrors ResolverListReader:92-102.

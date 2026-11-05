@@ -49,6 +49,8 @@ public class HostWiringTests
         // Phase 5e: the Query Monitor + Logs & Diagnostics services and view-models.
         services.AddSingleton<IQueryLogReader>(_ => new QueryLogReader());
         services.AddSingleton<IQueryPoller, PeriodicTimerQueryPoller>();
+        // v1.3.0 per-app attribution: the App column's thin pipe seam (mirrors App.OnStartup).
+        services.AddSingleton<IDnsAttributionReader, DnsAttributionReader>();
         services.AddSingleton<ILogTailReader, LogTailReader>();
         // Phase 5f (Settings): theme applier, startup registration, offline integrity reader.
         services.AddSingleton<IThemeApplier, WpfThemeApplier>();
@@ -245,6 +247,8 @@ public class HostWiringTests
 
         Assert.IsType<QueryLogReader>(provider.GetRequiredService<IQueryLogReader>());
         Assert.IsType<PeriodicTimerQueryPoller>(provider.GetRequiredService<IQueryPoller>());
+        // v1.3.0: the App column's attribution seam resolves to its production pipe-backed concrete.
+        Assert.IsType<DnsAttributionReader>(provider.GetRequiredService<IDnsAttributionReader>());
         Assert.IsType<LogTailReader>(provider.GetRequiredService<ILogTailReader>());
     }
 

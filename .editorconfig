@@ -100,6 +100,15 @@ dotnet_diagnostic.CA1707.severity = none
 [src/DnsCryptControl.Service/Supplychain/BinaryVerifyInstaller.cs]
 dotnet_diagnostic.CA1031.severity = none
 
+# DnsAttributionWatcher hosts several fault barriers that must contain ANY exception: the ETW
+# callback (a throw across the ETW dispatch terminates the SYSTEM helper), the idle Timer
+# callback (an uncaught pool-thread exception crashes the process), the blocking Source.Process()
+# pump thread, and the session start/stop wrappers (ETW unavailability or a teardown race must
+# degrade attribution to "unknown", never fault the helper). Catching general Exception at those
+# barriers is intentional for this file only.
+[src/DnsCryptControl.Service/Windows/DnsAttributionWatcher.cs]
+dotnet_diagnostic.CA1031.severity = none
+
 # DashboardViewModel.RunPollLoopAsync is a fire-and-forget Task: any exception escaping a
 # per-tick RefreshAsync that isn't caught here would go unobserved and permanently kill
 # polling, leaving a stale status surface — a safety concern for this OPSEC tool. Catching

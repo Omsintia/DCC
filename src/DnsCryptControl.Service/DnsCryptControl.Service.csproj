@@ -14,6 +14,11 @@
     <!-- Phase 4 supply-chain: pure-managed Ed25519 + BLAKE2b-512 for minisign verification.
          Service assembly ONLY (never Core/Ipc/Platform/UI). NuGetAudit-clean at 2.6.2. -->
     <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
+    <!-- Per-app DNS attribution (v1.3.0): real-time ETW consumption of Microsoft-Windows-DNS-Client
+         event 3006, the only place the originating PID of a dnscache-forwarded query still exists.
+         Service assembly ONLY (never Core/Ipc/Platform/UI) — only the LocalSystem helper has ETW
+         real-time consume rights. NuGetAudit-clean at 3.1.30. -->
+    <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.1.30" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.1" />
     <PackageReference Include="System.ServiceProcess.ServiceController" Version="8.0.1" />

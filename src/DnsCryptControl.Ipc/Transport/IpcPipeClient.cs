@@ -92,7 +92,7 @@ public sealed class IpcPipeClient : IAsyncDisposable
                 // a large pasted config (P5b-E7). Fail closed like every other transport
                 // failure instead of leaking the throw to the caller. The null-guard on
                 // requestJson at method entry is outside this scope and still throws.
-                return null; // request frame over the 1 MiB cap: fail closed
+                return null; // request frame over IpcSerializer.MaxBytes (16 MiB): fail closed
             }
             return await IpcFraming.ReadFrameAsync(stream, callCts.Token).ConfigureAwait(false);
         }

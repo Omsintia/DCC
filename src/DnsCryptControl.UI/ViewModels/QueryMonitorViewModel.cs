@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -9,6 +10,8 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using DnsCryptControl.Core.QueryLog;
 using DnsCryptControl.Core.Security;
 using DnsCryptControl.Core.Toml;
+using DnsCryptControl.Ipc.Commands;
+using DnsCryptControl.UI.Models;
 using DnsCryptControl.UI.Services;
 
 namespace DnsCryptControl.UI.ViewModels;
@@ -27,6 +30,14 @@ namespace DnsCryptControl.UI.ViewModels;
 /// <see cref="IUiDispatcher"/>. The poller + reader are injected seams so tests pump ticks with zero
 /// wall-clock sleeps. Fail-closed: a reader error never crashes the VM, and a lost/rejected config
 /// write leaves the VM in a coherent state.</para>
+///
+/// <para>Per-app attribution (v1.3.0): each tick FIRST awaits an <see cref="IDnsAttributionReader"/>
+/// fetch (the helper's ETW-observed lookups with their originating process), merges it into a
+/// bounded by-name lookup, and correlates every appended row by normalized name + time window.
+/// Best-effort and honest (IC-16): exactly one distinct matching process names the row; more than
+/// one shows <c>multiple</c>; none — including any fetch failure — shows <c>—</c>, never a guess.
+/// The polls themselves are the demand signal the helper's capture lives by, so they run only
+/// while logging is enabled (the same consent gate as everything here).</para>
 /// </summary>
 public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposable, IQueryLogSession
 {
@@ -51,6 +62,8 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
     private readonly IQueryLogReader _reader;
     private readonly IQueryPoller _poller;
     private readonly IUiDispatcher _ui;
+    private readonly IUiStateStore _uiState;
+    private readonly IDnsAttributionReader _attribution;
     private readonly TimeSpan _pollInterval;
 
     /// <summary>Every row ever appended this session (bounded to <see cref="MaxRows"/>), before the
@@ -126,6 +139,9 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
     [ObservableProperty]
     private string? _configError;
 
+    /// <param name="uiState">The per-user preference store; seeds (and persists) the column widths.</param>
+    /// <param name="attributionReader">The per-app attribution seam (v1.3.0); polled each tick while
+    /// logging is on so appended rows can be correlated to their originating process.</param>
     /// <param name="pollInterval">The read-and-shred poll cadence; defaults to ~750 ms. Tests pass any
     /// value — they never wait on it, they pump the fake poller's ticks directly.</param>
     public QueryMonitorViewModel(
@@ -133,19 +149,111 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
         IQueryLogReader reader,
         IQueryPoller poller,
         IUiDispatcher ui,
+        IUiStateStore uiState,
+        IDnsAttributionReader attributionReader,
         TimeSpan? pollInterval = null)
     {
         ArgumentNullException.ThrowIfNull(configFile);
         ArgumentNullException.ThrowIfNull(reader);
         ArgumentNullException.ThrowIfNull(poller);
         ArgumentNullException.ThrowIfNull(ui);
+        ArgumentNullException.ThrowIfNull(uiState);
+        ArgumentNullException.ThrowIfNull(attributionReader);
         _configFile = configFile;
         _reader = reader;
         _poller = poller;
         _ui = ui;
+        _uiState = uiState;
+        _attribution = attributionReader;
         _pollInterval = pollInterval ?? DefaultPollInterval;
+
+        // Seed the column layout from the persisted per-user state, clamped so a hand-edited
+        // ui-state.json can never produce an ungrabbable (0-width) or off-screen column.
+        var cols = uiState.Load().QueryMonitorColumns ?? new UiQueryMonitorColumns();
+        _timeColumnWidth = ClampWidth(cols.Time);
+        _typeColumnWidth = ClampWidth(cols.Type);
+        _actionColumnWidth = ClampWidth(cols.Action);
+        _latencyColumnWidth = ClampWidth(cols.Latency);
+        _serverColumnWidth = ClampWidth(cols.Server);
+        _appColumnWidth = ClampWidth(cols.App);
+
         _poller.Tick += OnPollerTick;
     }
+
+    // --------------------------------------------------------------- column layout (view geometry)
+
+    /// <summary>Clamp bounds for the user-resizable column widths (px). The floor keeps every column
+    /// grabbable (a 0-width column could never be re-widened by dragging); the ceiling keeps a column
+    /// from pushing the star-sized Name column entirely off-screen.</summary>
+    internal const double MinColumnWidth = 36;
+
+    /// <inheritdoc cref="MinColumnWidth"/>
+    internal const double MaxColumnWidth = 800;
+
+    /// <summary>Width (px) of the Time column. The six width properties are pure view geometry —
+    /// bound by both the header and every row so the two stay aligned; persisted only on
+    /// <see cref="CommitColumnWidths"/> (drag end), never per drag tick.</summary>
+    [ObservableProperty]
+    private double _timeColumnWidth;
+
+    /// <inheritdoc cref="TimeColumnWidth"/>
+    [ObservableProperty]
+    private double _typeColumnWidth;
+
+    /// <inheritdoc cref="TimeColumnWidth"/>
+    [ObservableProperty]
+    private double _actionColumnWidth;
+
+    /// <inheritdoc cref="TimeColumnWidth"/>
+    [ObservableProperty]
+    private double _latencyColumnWidth;
+
+    /// <inheritdoc cref="TimeColumnWidth"/>
+    [ObservableProperty]
+    private double _serverColumnWidth;
+
+    /// <inheritdoc cref="TimeColumnWidth"/>
+    [ObservableProperty]
+    private double _appColumnWidth;
+
+    /// <summary>Applies one live drag delta from a header divider to its column — clamped, no
+    /// persistence (that happens once, on <see cref="CommitColumnWidths"/> at drag end).</summary>
+    public void ResizeColumn(QueryMonitorColumn column, double delta)
+    {
+        switch (column)
+        {
+            case QueryMonitorColumn.Time: TimeColumnWidth = ClampWidth(TimeColumnWidth + delta); break;
+            case QueryMonitorColumn.Type: TypeColumnWidth = ClampWidth(TypeColumnWidth + delta); break;
+            case QueryMonitorColumn.Action: ActionColumnWidth = ClampWidth(ActionColumnWidth + delta); break;
+            case QueryMonitorColumn.Latency: LatencyColumnWidth = ClampWidth(LatencyColumnWidth + delta); break;
+            case QueryMonitorColumn.Server: ServerColumnWidth = ClampWidth(ServerColumnWidth + delta); break;
+            case QueryMonitorColumn.App: AppColumnWidth = ClampWidth(AppColumnWidth + delta); break;
+            default: break; // unknown column — geometry only, never throw at a drag.
+        }
+    }
+
+    /// <summary>Persists the current column widths. Loads FRESH state and replaces only the column
+    /// block, so preferences other tabs' view-models persist (favorites, theme, the kill-switch
+    /// opt-in) are never clobbered by a stale copy held here.</summary>
+    public void CommitColumnWidths()
+    {
+        var state = _uiState.Load();
+        state.QueryMonitorColumns = new UiQueryMonitorColumns
+        {
+            Time = TimeColumnWidth,
+            Type = TypeColumnWidth,
+            Action = ActionColumnWidth,
+            Latency = LatencyColumnWidth,
+            Server = ServerColumnWidth,
+            App = AppColumnWidth,
+        };
+        _uiState.Save(state);
+    }
+
+    /// <summary>Clamps a width to the grabbable range; non-finite input (a hand-edited file) falls
+    /// to the floor rather than poisoning layout with NaN/Infinity.</summary>
+    private static double ClampWidth(double value) =>
+        double.IsFinite(value) ? Math.Clamp(value, MinColumnWidth, MaxColumnWidth) : MinColumnWidth;
 
     // --------------------------------------------------------------- launch (per-session hard-reset)
 
@@ -423,8 +531,15 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
 
             // "Stop & clear" (FIX 2): also drop the in-memory buffer so the displayed browsing history
             // disappears when the user stops. Runs regardless of the write outcome — the user asked to
-            // clear, and the buffered rows are the on-screen residue.
-            _ui.Post(ClearView);
+            // clear, and the buffered rows are the on-screen residue. ClearView also drops the
+            // domain→process attribution lookup (the same residue, one join away from the rows), and
+            // the poll cursor rewinds to 0 so a FRESH consent starts a fresh cursor — the helper's
+            // ring is likewise cleared when its capture session stops, so nothing replays.
+            _ui.Post(() =>
+            {
+                _attributionAfterSeq = 0;
+                ClearView();
+            });
         }
         catch (OperationCanceledException)
         {
@@ -623,12 +738,16 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
         IsPaused = false;
     }
 
-    /// <summary>Empties the in-memory ring buffer (design 2.5 "Clear view") — a display reset only; does
-    /// not touch config, the poller, or the on-disk file.</summary>
+    /// <summary>Empties the in-memory ring buffer (design 2.5 "Clear view") AND the domain→process
+    /// attribution lookup — the buffered rows are the on-screen residue, and the lookup is the same
+    /// browsing-history residue one join away (domain→app pairs), so "clear" must drop both rather
+    /// than leave the final ~30 s of pairs in memory until the next poller tick prunes them. A
+    /// display/memory reset only; does not touch config, the poller, or the on-disk file.</summary>
     public void ClearView()
     {
         _allRows.Clear();
         Rows.Clear();
+        _attributionsByName.Clear();
         RefreshCounts();
         RaiseChanged();   // Phase 5i: reset the session aggregates + notify consumers (the Dashboard clears too).
     }
@@ -729,16 +848,69 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
     // --------------------------------------------------------------- poller tick → drain → buffer
 
     /// <summary>
-    /// One poll tick. ALWAYS drains the reader (read-and-shred) while running — this is the load-bearing
-    /// OPSEC behaviour (FIX 1): the on-disk log is truncated every tick for as long as logging is on,
-    /// even when the tab is inactive or paused, so browsing history at rest never accumulates past ~1
-    /// interval. The DISPLAY is what's gated: the drained rows are only appended to the visible
-    /// <see cref="Rows"/> when <see cref="IsActive"/> AND not <see cref="IsPaused"/>; otherwise they are
-    /// DISCARDED (still shredded, just not shown). Fail-closed by contract — the reader never throws; a
-    /// read error only surfaces as <see cref="HadReadError"/>. Runs UI-affine (the poller marshals its
-    /// ticks through the dispatcher), so it touches <see cref="Rows"/> directly.
+    /// One poll tick. FIRST awaits an attribution fetch (v1.3.0 — awaited, never fire-and-forget,
+    /// so the rows appended below correlate against data at least as fresh as this tick; the merge
+    /// and everything after the await run through <see cref="_ui"/>.Post, keeping all state
+    /// UI-thread-confined per IC-5), then drains and appends via <see cref="DrainTick"/>. The
+    /// fetch is SKIPPED — not queued — while a previous one is still in flight: the drain is the
+    /// OPSEC shredder and must never stack up behind a slow pipe; correlation is best-effort and
+    /// simply uses the last merged lookup for that tick. <c>async void</c> is the event-handler
+    /// idiom (mirrors the view's Click handlers) and nothing can escape it: the fetch contract is
+    /// null-on-failure, and the defensive catch degrades a faulted seam to "no data".
     /// </summary>
-    private void OnPollerTick(object? sender, EventArgs e)
+    private async void OnPollerTick(object? sender, EventArgs e)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        DnsAttributionBatch? batch = null;
+        var fetched = false;
+        if (LoggingEnabled && !_attributionFetchInFlight)
+        {
+            _attributionFetchInFlight = true;
+            fetched = true;
+            try
+            {
+                batch = await _attribution.FetchAsync(_attributionAfterSeq, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                batch = null; // best-effort (IC-16): a faulted fetch degrades rows to "—" — an
+                              // exception must never escape this async void handler.
+            }
+        }
+
+        _ui.Post(() =>
+        {
+            if (fetched)
+            {
+                _attributionFetchInFlight = false;
+                if (batch is not null)
+                {
+                    _attributionAfterSeq = batch.LastSeq;
+                    MergeAttributions(batch.Entries);
+                }
+            }
+
+            DrainTick();
+        });
+    }
+
+    /// <summary>
+    /// The drain/append tick body. ALWAYS drains the reader (read-and-shred) while running — this is the
+    /// load-bearing OPSEC behaviour (FIX 1): the on-disk log is truncated every tick for as long as
+    /// logging is on, even when the tab is inactive or paused, so browsing history at rest never
+    /// accumulates past ~1 interval. The DISPLAY is what's gated: the drained rows are only appended to
+    /// the visible <see cref="Rows"/> when <see cref="IsActive"/> AND not <see cref="IsPaused"/>;
+    /// otherwise they are DISCARDED (still shredded, just not shown). Fail-closed by contract — the
+    /// reader never throws; a read error only surfaces as <see cref="HadReadError"/>. Runs UI-affine
+    /// (posted through <see cref="_ui"/> by <see cref="OnPollerTick"/>), so it touches
+    /// <see cref="Rows"/> directly.
+    /// </summary>
+    private void DrainTick()
     {
         if (_disposed)
         {
@@ -748,6 +920,11 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
         // ALWAYS drain (shred the file), regardless of tab-active/paused — this is the shredder.
         var drained = _reader.Drain();
         HadReadError = drained.HadReadError;
+
+        // Age out stale attribution candidates every tick so the lookup stays bounded and a
+        // long-gone process can never claim a fresh query.
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        PruneAttributions(nowMs);
 
         if (drained.Lines.Count == 0)
         {
@@ -760,7 +937,7 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
         // on disable. Only the VISIBLE list is gated on active/not-paused (below).
         foreach (var line in drained.Lines)
         {
-            AppendRow(new QueryRowViewModel(line));
+            AppendRow(new QueryRowViewModel(line, ResolveAppFor(line.Name, nowMs)));
         }
 
         // The DISPLAY (visible Rows) still only refreshes while the tab is active AND not paused, so
@@ -774,6 +951,172 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
         // Notify session consumers (the Dashboard) with fresh aggregates (also recomputes Stats).
         RaiseChanged();
     }
+
+    // --------------------------------------------------------------- per-app attribution (v1.3.0)
+
+    /// <summary>The honest unknown (IC-16): shown when no attribution matched a row — including
+    /// every degraded case (fetch failed, helper old, ETW unavailable). Never a guess.</summary>
+    internal const string UnknownAppLabel = "—";
+
+    /// <summary>Shown when MORE THAN ONE distinct process looked the row's name up inside the
+    /// correlation window — naming any one of them would be a guess (IC-16).</summary>
+    internal const string MultipleAppsLabel = "multiple";
+
+    /// <summary>The ± correlation window around NOW. Rows are at most one poll (~750 ms) old when
+    /// appended, so 5 s comfortably absorbs the helper-capture→proxy-log→drain pipeline plus any
+    /// clock skew between the helper's stamps and this process — while staying narrow enough that
+    /// an old lookup of the same name cannot claim a fresh query.</summary>
+    private static readonly TimeSpan AttributionWindow = TimeSpan.FromSeconds(5);
+
+    /// <summary>How long merged candidates are retained before pruning — comfortably past the
+    /// correlation window (nothing older can ever match) while keeping the lookup small.</summary>
+    private static readonly TimeSpan AttributionRetention = TimeSpan.FromSeconds(30);
+
+    /// <summary>Per-name candidate cap: only the most recent few can fall inside the ±5 s window,
+    /// so keeping more would only serve stale data.</summary>
+    private const int MaxAttributionCandidatesPerName = 4;
+
+    /// <summary>Hard cap on distinct names in the lookup (matches the helper ring's bound): the
+    /// 30 s prune keeps it far smaller in practice; past the cap new names are dropped (attribution
+    /// is best-effort — bounded memory wins over completeness).</summary>
+    private const int MaxAttributionNames = 2048;
+
+    /// <summary>The by-name attribution lookup (keys normalized: lowercase, trailing dot
+    /// stripped). UI-thread-confined like every other piece of VM state. Pruned to ~30 s by the
+    /// poller ticks AND dropped outright by <see cref="ClearView"/> (so "Stop &amp; clear" leaves
+    /// no domain→process residue behind once the ticks stop).</summary>
+    private readonly Dictionary<string, List<AttributionCandidate>> _attributionsByName = new(StringComparer.Ordinal);
+
+    /// <summary>Test seam: the number of distinct names the attribution lookup currently holds —
+    /// lets the OPSEC tests prove disable/ClearView actually dropped the domain→process residue
+    /// (mirroring the other internal observability seams here).</summary>
+    internal int AttributionLookupCount => _attributionsByName.Count;
+
+    /// <summary>The poll cursor: the last batch's <c>LastSeq</c>, sent back so each attribution
+    /// entry crosses the pipe exactly once.</summary>
+    private long _attributionAfterSeq;
+
+    /// <summary>True while a fetch is awaiting the pipe — the next tick skips its fetch (never
+    /// queues) so the shredder drain is never delayed by a slow helper.</summary>
+    private bool _attributionFetchInFlight;
+
+    /// <summary>Folds one fetched batch into the by-name lookup, newest-last (batches arrive
+    /// oldest → newest), enforcing both bounds. Names are normalized so the ETW spelling (often
+    /// with a trailing dot / mixed case) meets the proxy log's spelling on equal terms.</summary>
+    private void MergeAttributions(IReadOnlyList<DnsAttributionEntry> entries)
+    {
+        foreach (var entry in entries)
+        {
+            var key = NormalizeQueryName(entry.QueryName);
+            if (key.Length == 0)
+            {
+                continue;
+            }
+
+            if (!_attributionsByName.TryGetValue(key, out var candidates))
+            {
+                if (_attributionsByName.Count >= MaxAttributionNames)
+                {
+                    continue; // bounded: drop new names rather than grow without limit.
+                }
+
+                candidates = new List<AttributionCandidate>(MaxAttributionCandidatesPerName);
+                _attributionsByName[key] = candidates;
+            }
+
+            candidates.Add(new AttributionCandidate(entry.ProcessId, entry.ProcessName, entry.UnixTimeMs));
+            if (candidates.Count > MaxAttributionCandidatesPerName)
+            {
+                candidates.RemoveAt(0); // oldest first — entries arrive in capture order.
+            }
+        }
+    }
+
+    /// <summary>Drops candidates older than <see cref="AttributionRetention"/> (and then-empty
+    /// names) so the lookup can never accumulate a session's worth of history — while ticks run it
+    /// only ever holds the last ~30 s needed for correlation, and when they STOP the final window
+    /// is dropped too (<see cref="ClearView"/>, run by "Stop &amp; clear"), never left behind.</summary>
+    private void PruneAttributions(long nowMs)
+    {
+        List<string>? empty = null;
+        foreach (var (name, candidates) in _attributionsByName)
+        {
+            candidates.RemoveAll(c => nowMs - c.UnixTimeMs > (long)AttributionRetention.TotalMilliseconds);
+            if (candidates.Count == 0)
+            {
+                (empty ??= new List<string>()).Add(name);
+            }
+        }
+
+        if (empty is not null)
+        {
+            foreach (var name in empty)
+            {
+                _attributionsByName.Remove(name);
+            }
+        }
+    }
+
+    /// <summary>Correlates one appended row against the lookup: candidates for the row's
+    /// normalized name within ±<see cref="AttributionWindow"/> of now. Exactly ONE distinct
+    /// process → its name (or a bare <c>PID n</c> when the name was unresolvable — the process
+    /// had exited at capture); more than one distinct process → <see cref="MultipleAppsLabel"/>;
+    /// none → <see cref="UnknownAppLabel"/>. Never guesses (IC-16).</summary>
+    private string ResolveAppFor(string rowName, long nowMs)
+    {
+        var key = NormalizeQueryName(rowName);
+        if (key.Length == 0 || !_attributionsByName.TryGetValue(key, out var candidates))
+        {
+            return UnknownAppLabel;
+        }
+
+        var windowMs = (long)AttributionWindow.TotalMilliseconds;
+        var any = false;
+        var matchedPid = 0;
+        string? matchedName = null;
+        foreach (var candidate in candidates)
+        {
+            if (Math.Abs(nowMs - candidate.UnixTimeMs) > windowMs)
+            {
+                continue;
+            }
+
+            if (!any)
+            {
+                any = true;
+                matchedPid = candidate.ProcessId;
+                matchedName = candidate.ProcessName;
+            }
+            else if (candidate.ProcessId != matchedPid)
+            {
+                return MultipleAppsLabel; // two distinct processes — naming either is a guess.
+            }
+            else
+            {
+                matchedName ??= candidate.ProcessName; // same pid — take any capture that got a name.
+            }
+        }
+
+        if (!any)
+        {
+            return UnknownAppLabel;
+        }
+
+        return matchedName ?? string.Create(CultureInfo.InvariantCulture, $"PID {matchedPid}");
+    }
+
+    /// <summary>Correlation key normalization: the ETW payload name is often FQDN-dotted and/or
+    /// differently cased from the proxy log's qname — lowercase + strip ONE trailing dot so the
+    /// two spellings of the same lookup meet on one key.</summary>
+    private static string NormalizeQueryName(string name)
+    {
+        var trimmed = name.Length > 0 && name[^1] == '.' ? name[..^1] : name;
+        return trimmed.ToLowerInvariant();
+    }
+
+    /// <summary>One merged attribution candidate: who (pid + name resolved at capture) looked the
+    /// key name up, and when — the when drives both the ±window match and the 30 s prune.</summary>
+    private readonly record struct AttributionCandidate(int ProcessId, string? ProcessName, long UnixTimeMs);
 
     /// <summary>Appends one row to the buffer, evicting the oldest past the <see cref="MaxRows"/> cap so
     /// memory stays bounded (ring buffer). Does NOT rebuild the view — the caller batches that per tick.</summary>

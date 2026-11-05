@@ -53,9 +53,19 @@ public sealed class QueryRowViewModel
     /// <summary>The upstream server, or <c>-</c> for a locally-answered action (verbatim).</summary>
     public string Server { get; }
 
-    public QueryRowViewModel(QueryLogLine line)
+    /// <summary>The originating app (v1.3.0 per-app attribution): the ETW-correlated process name,
+    /// a bare <c>PID 1234</c> when the process had already exited, <c>multiple</c> when more than
+    /// one process looked the name up inside the correlation window, and <c>—</c> when nothing
+    /// matched. BEST-EFFORT display data correlated by the VM at append time (IC-16: the honest
+    /// unknown is shown rather than a guess) — like every other cell, immutable once built.</summary>
+    public string App { get; }
+
+    /// <param name="app">The correlated originating-app label; defaults to the honest unknown
+    /// (<c>—</c>) so attribution-less construction sites stay truthful by default.</param>
+    public QueryRowViewModel(QueryLogLine line, string app = "—")
     {
         ArgumentNullException.ThrowIfNull(line);
+        ArgumentNullException.ThrowIfNull(app);
         Time = QueryLogParser.StripTimeBrackets(line.Time);
         Name = line.Name;
         Type = line.Type;
@@ -64,6 +74,7 @@ public sealed class QueryRowViewModel
         Severity = SeverityFor(line.Action);
         DurationMs = line.DurationMs;
         Server = line.Server;
+        App = app;
     }
 
     /// <summary>The action's stable uppercase display label (matches the proxy's own token where one

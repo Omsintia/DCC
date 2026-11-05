@@ -61,6 +61,7 @@ DLLs are installed alongside the executables.
 | WPF-UI | 4.3.0 | MIT |
 | CommunityToolkit.Mvvm | 8.4.2 | MIT |
 | BouncyCastle.Cryptography | 2.6.2 | MIT |
+| Microsoft.Diagnostics.Tracing.TraceEvent | 3.1.30 | MIT |
 | Tomlyn | 2.3.2 | BSD-2-Clause |
 | Microsoft.Extensions.Hosting | 8.0.1 | MIT |
 | Microsoft.Extensions.Hosting.WindowsServices | 8.0.1 | MIT |
@@ -73,6 +74,7 @@ Copyright notices:
 - WPF-UI — Copyright (c) 2021-2025 Leszek Pomianowski and WPF UI Contributors
 - CommunityToolkit.Mvvm — Copyright (c) .NET Foundation and Contributors
 - BouncyCastle.Cryptography — Copyright (c) 2000-2025 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
+- Microsoft.Diagnostics.Tracing.TraceEvent — Copyright (c) Microsoft Corporation
 - Tomlyn — Copyright (c) 2019-2026 Alexandre Mutel
 - Microsoft.Extensions.* / System.ServiceProcess.ServiceController / System.IO.Pipes.AccessControl — Copyright (c) .NET Foundation and Contributors
 - Microsoft.Management.Infrastructure — Copyright (c) Microsoft Corporation

@@ -467,14 +467,15 @@
     <p style="margin:0 0 4px; color:var(--muted); font-size:14px; max-width:74ch;">
       In the <b>Filtering</b> tab, find the <b>Blocked&nbsp;names</b> card: click
       <b>Enable&nbsp;&amp;&nbsp;wire</b> first &mdash; this creates the rule file and points the proxy at it
-      (without it the list exists but is never consulted). Then paste your blocklist into the editor
-      &mdash; one domain pattern per line, in the <b>wildcard&#8209;domains</b> format shown at the bottom
-      of this panel &mdash; and click <b>Save</b>.</p>
-    <div class="callout" style="margin:10px 0 12px;"><b>Size note (v1.2.6):</b> very large lists &mdash; like the full official
-      DNSCrypt aggregate at ~9&nbsp;MB &mdash; exceed the current 1&nbsp;MiB per&#8209;save limit and can make the editor
-      unresponsive on paste. Pick a compact list for now (HaGeZi <i>Light</i> or OISD <i>small</i> are good choices);
-      the next release lifts the limit to 16&nbsp;MiB and adds an <b>Import file&hellip;</b> button so big lists load
-      without pasting at all.</div>
+      (without it the list exists but is never consulted). Then add your blocklist &mdash; one domain
+      pattern per line, in the <b>wildcard&#8209;domains</b> format shown at the bottom of this panel
+      &mdash; and click <b>Save</b>. Paste a short list into the editor; for a big downloaded list, click
+      <b>Import file&hellip;</b> on the card instead of pasting.</p>
+    <div class="callout" style="margin:10px 0 12px;"><b>Big lists:</b> a single save can carry up to <b>16&nbsp;MiB</b>
+      &mdash; enough for the full official DNSCrypt aggregate (~9&nbsp;MB). Past about 1&nbsp;MB the editor stops listing
+      the rules line by line (that is what keeps the window responsive) and shows a size summary instead; the list
+      still saves and filters normally. <i>(v1.2.6 and older: the limit was 1&nbsp;MiB and there was no Import button
+      &mdash; use a compact list such as HaGeZi Light or OISD small.)</i></div>
     <p style="margin:0 0 4px; color:var(--muted); font-size:14px; max-width:74ch;">
       These are the widely used, community&#8209;maintained lists the DNSCrypt project points to:</p>
 

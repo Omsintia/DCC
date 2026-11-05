@@ -34,10 +34,11 @@ public class Phase5cGateTests
     // the living guard against ACCIDENTAL wire drift; this UI-side pin just mirrors the version.
 
     [Fact]
-    public void IpcProtocolVersion_isAt4()
+    public void IpcProtocolVersion_isAt5()
     {
-        // v3 → v4: the v1.2.0 FIX #1 VerifyResolution verb (post-apply real-name resolve check).
-        Assert.Equal(4, IpcProtocol.Version);
+        // v4 → v5: the framing cap rose 1 → 16 MiB (big-blocklist WriteRuleFile); a mixed pair
+        // would lose legal large frames at the transport, so the handshake must refuse it.
+        Assert.Equal(5, IpcProtocol.Version);
     }
 
     // ---- end-to-end adversarial: hostile list name cannot be written into config ----
