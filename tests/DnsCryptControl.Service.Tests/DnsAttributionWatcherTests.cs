@@ -139,6 +139,40 @@ public class DnsAttributionWatcherTests
     }
 
     [Fact]
+    public void A_plausible_event_time_is_the_stamp_not_the_receipt_time()
+    {
+        // ETW delivers in ~1 s flush batches, so the callback receives a lookup's event up to a
+        // second or more AFTER the lookup. The ring must carry WHEN THE LOOKUP HAPPENED: the UI only
+        // looks a few hundred ms forward of a query-log row, which is sound only if a row's own lookup
+        // is stamped before the row appeared — a receipt-time stamp can land after it.
+        var (watcher, clock) = Build();
+        using (watcher)
+        {
+            var lookupAt = clock.Now - TimeSpan.FromMilliseconds(1200); // flushed 1.2 s later
+
+            watcher.HandleQueryEvent(4242, "late.example", lookupAt);
+
+            var rec = Assert.Single(watcher.GetSince(0).Records);
+            Assert.Equal(lookupAt.ToUnixTimeMilliseconds(), rec.UnixTimeMs);
+        }
+    }
+
+    [Theory]
+    [InlineData(-61_000)] // older than any plausible flush lag (a clock change / bad header)
+    [InlineData(2_500)]   // in the future beyond jitter
+    public void An_implausible_event_time_falls_back_to_the_receipt_time(int offsetMs)
+    {
+        var (watcher, clock) = Build();
+        using (watcher)
+        {
+            watcher.HandleQueryEvent(4242, "odd.example", clock.Now + TimeSpan.FromMilliseconds(offsetMs));
+
+            var rec = Assert.Single(watcher.GetSince(0).Records);
+            Assert.Equal(clock.Now.ToUnixTimeMilliseconds(), rec.UnixTimeMs);
+        }
+    }
+
+    [Fact]
     public void ProcessName_isResolvedAtCapture_forALiveProcess()
     {
         var (watcher, _) = Build();

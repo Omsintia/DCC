@@ -33,11 +33,20 @@ namespace DnsCryptControl.UI.ViewModels;
 ///
 /// <para>Per-app attribution (v1.3.0): each tick FIRST awaits an <see cref="IDnsAttributionReader"/>
 /// fetch (the helper's ETW-observed lookups with their originating process), merges it into a
-/// bounded by-name lookup, and correlates every appended row by normalized name + time window.
-/// Best-effort and honest (IC-16): exactly one distinct matching process names the row; more than
-/// one shows <c>multiple</c>; none — including any fetch failure — shows <c>—</c>, never a guess.
-/// The polls themselves are the demand signal the helper's capture lives by, so they run only
-/// while logging is enabled (the same consent gate as everything here).</para>
+/// bounded by-name lookup, and correlates rows by normalized name inside an ASYMMETRIC window around
+/// each row's APPEND time — from 5 s before it to 0.5 s after (jitter slack only: the lookup that
+/// produced a row was raised before the row existed, so a candidate stamped later can only be a
+/// different, later lookup). Best-effort and honest (IC-16): exactly one distinct in-window process
+/// names the row; more than one shows <c>multiple</c>; none shows <c>—</c>, never a guess. Because
+/// ETW delivers its events in ~1 s flush batches, a row is often drained BEFORE its lookup's event
+/// has been fetched, so attribution is LATE-BOUND: a row appended as <c>—</c> waits on a bounded
+/// pending list (at most 256 rows, each at most 8 s) and is re-correlated — still around its append
+/// time — on every later tick, right after that tick's merge. The first decision is written into the
+/// row's observable <see cref="QueryRowViewModel.App"/> (one-way: a decided row is never changed or
+/// downgraded), and a row that ages out keeps <c>—</c>; a fetch failure is simply "no data" for that
+/// tick, and a batch fetched before a clear is dropped whole, never merged. The polls themselves are
+/// the demand signal the helper's capture lives by, so they run only while logging is enabled (the
+/// same consent gate as everything here).</para>
 /// </summary>
 public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposable, IQueryLogSession
 {
@@ -65,6 +74,7 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
     private readonly IUiStateStore _uiState;
     private readonly IDnsAttributionReader _attribution;
     private readonly TimeSpan _pollInterval;
+    private readonly Func<DateTimeOffset> _clock;
 
     /// <summary>Every row ever appended this session (bounded to <see cref="MaxRows"/>), before the
     /// search/action filter. <see cref="Rows"/> is the filtered projection of this.</summary>
@@ -144,6 +154,10 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
     /// logging is on so appended rows can be correlated to their originating process.</param>
     /// <param name="pollInterval">The read-and-shred poll cadence; defaults to ~750 ms. Tests pass any
     /// value — they never wait on it, they pump the fake poller's ticks directly.</param>
+    /// <param name="clock">Injectable UTC clock — the attribution correlation's time base (each
+    /// tick's candidate prune, the pending age-out, and the append stamp every row's window is
+    /// anchored to); defaults to <see cref="DateTimeOffset.UtcNow"/>. Exposed only so tests can age
+    /// pending rows deterministically (mirrors <see cref="DashboardViewModel"/>'s clock seam).</param>
     public QueryMonitorViewModel(
         IConfigFileService configFile,
         IQueryLogReader reader,
@@ -151,7 +165,8 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
         IUiDispatcher ui,
         IUiStateStore uiState,
         IDnsAttributionReader attributionReader,
-        TimeSpan? pollInterval = null)
+        TimeSpan? pollInterval = null,
+        Func<DateTimeOffset>? clock = null)
     {
         ArgumentNullException.ThrowIfNull(configFile);
         ArgumentNullException.ThrowIfNull(reader);
@@ -166,6 +181,7 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
         _uiState = uiState;
         _attribution = attributionReader;
         _pollInterval = pollInterval ?? DefaultPollInterval;
+        _clock = clock ?? (static () => DateTimeOffset.UtcNow);
 
         // Seed the column layout from the persisted per-user state, clamped so a hand-edited
         // ui-state.json can never produce an ungrabbable (0-width) or off-screen column.
@@ -532,9 +548,12 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
             // "Stop & clear" (FIX 2): also drop the in-memory buffer so the displayed browsing history
             // disappears when the user stops. Runs regardless of the write outcome — the user asked to
             // clear, and the buffered rows are the on-screen residue. ClearView also drops the
-            // domain→process attribution lookup (the same residue, one join away from the rows), and
+            // domain→process attribution lookup (the same residue, one join away from the rows) and
+            // the late-binding pending list (no tick will ever age it out once the poller stops), and
             // the poll cursor rewinds to 0 so a FRESH consent starts a fresh cursor — the helper's
-            // ring is likewise cleared when its capture session stops, so nothing replays.
+            // ring is likewise cleared when its capture session stops, so nothing replays. ClearView
+            // also moves the attribution epoch on, so a fetch still in flight right now is dropped
+            // when it lands — it can neither refill the lookup nor un-rewind this cursor.
             _ui.Post(() =>
             {
                 _attributionAfterSeq = 0;
@@ -738,16 +757,22 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
         IsPaused = false;
     }
 
-    /// <summary>Empties the in-memory ring buffer (design 2.5 "Clear view") AND the domain→process
-    /// attribution lookup — the buffered rows are the on-screen residue, and the lookup is the same
-    /// browsing-history residue one join away (domain→app pairs), so "clear" must drop both rather
-    /// than leave the final ~30 s of pairs in memory until the next poller tick prunes them. A
-    /// display/memory reset only; does not touch config, the poller, or the on-disk file.</summary>
+    /// <summary>Empties the in-memory ring buffer (design 2.5 "Clear view"), the domain→process
+    /// attribution lookup, AND the late-binding pending list — the buffered rows are the on-screen
+    /// residue, the lookup is the same browsing-history residue one join away (domain→app pairs), and
+    /// each pending entry pins a row + its name, so "clear" must drop all three rather than leave them
+    /// in memory until the next poller tick prunes them (after "Stop &amp; clear" no tick ever comes).
+    /// A row cleared while pending is let go: a batch landing later has nothing to bind. It also
+    /// moves the attribution epoch on, so a fetch still in flight is dropped when it lands rather
+    /// than merged back in (see <see cref="OnPollerTick"/>). A display/memory reset only; does not
+    /// touch config, the poller, or the on-disk file.</summary>
     public void ClearView()
     {
         _allRows.Clear();
         Rows.Clear();
         _attributionsByName.Clear();
+        _pendingAttributions.Clear();
+        _attributionEpoch++; // a fetch still in flight now belongs to the cleared session: drop it.
         RefreshCounts();
         RaiseChanged();   // Phase 5i: reset the session aggregates + notify consumers (the Dashboard clears too).
     }
@@ -849,14 +874,20 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
 
     /// <summary>
     /// One poll tick. FIRST awaits an attribution fetch (v1.3.0 — awaited, never fire-and-forget,
-    /// so the rows appended below correlate against data at least as fresh as this tick; the merge
-    /// and everything after the await run through <see cref="_ui"/>.Post, keeping all state
+    /// so the batch is merged BEFORE <see cref="DrainTick"/> runs: the pending rows it re-correlates
+    /// and the rows it appends both see data at least as fresh as this tick; the merge and
+    /// everything after the await run through <see cref="_ui"/>.Post, keeping all state
     /// UI-thread-confined per IC-5), then drains and appends via <see cref="DrainTick"/>. The
     /// fetch is SKIPPED — not queued — while a previous one is still in flight: the drain is the
     /// OPSEC shredder and must never stack up behind a slow pipe; correlation is best-effort and
-    /// simply uses the last merged lookup for that tick. <c>async void</c> is the event-handler
-    /// idiom (mirrors the view's Click handlers) and nothing can escape it: the fetch contract is
-    /// null-on-failure, and the defensive catch degrades a faulted seam to "no data".
+    /// simply uses the last merged lookup for that tick (a row that misses out waits on the
+    /// pending list and is re-checked when the slow batch lands, within its pending lifetime).
+    /// Because a fetch can still be in flight when "Stop &amp; clear" (or any clear) runs, the
+    /// batch is merged only after re-checking ON the UI thread that logging is still on AND the
+    /// attribution epoch it was fetched under is still current; otherwise it is dropped whole (no
+    /// merge, no cursor move) — while the drain below runs either way. <c>async void</c> is the
+    /// event-handler idiom (mirrors the view's Click handlers) and nothing can escape it: the fetch
+    /// contract is null-on-failure, and the defensive catch degrades a faulted seam to "no data".
     /// </summary>
     private async void OnPollerTick(object? sender, EventArgs e)
     {
@@ -867,6 +898,7 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
 
         DnsAttributionBatch? batch = null;
         var fetched = false;
+        var epoch = _attributionEpoch; // which attribution session this fetch belongs to
         if (LoggingEnabled && !_attributionFetchInFlight)
         {
             _attributionFetchInFlight = true;
@@ -878,8 +910,9 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
             }
             catch (Exception)
             {
-                batch = null; // best-effort (IC-16): a faulted fetch degrades rows to "—" — an
-                              // exception must never escape this async void handler.
+                batch = null; // best-effort (IC-16): a faulted fetch is just "no data" this tick
+                              // (pending rows wait for the next one) — an exception must never
+                              // escape this async void handler.
             }
         }
 
@@ -888,13 +921,20 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
             if (fetched)
             {
                 _attributionFetchInFlight = false;
-                if (batch is not null)
+
+                // Re-checked HERE — on the UI thread, AFTER the await — because a Stop & clear (or any
+                // clear) may have run while the fetch was in flight: such a batch belongs to the
+                // cleared session, and merging it would refill the lookup the clear just emptied and
+                // un-reset the rewound cursor. It is dropped whole: no merge, no cursor move. Logging
+                // being on again (a quick re-enable) is not enough — the epoch must match too.
+                if (batch is not null && LoggingEnabled && epoch == _attributionEpoch)
                 {
                     _attributionAfterSeq = batch.LastSeq;
                     MergeAttributions(batch.Entries);
                 }
             }
 
+            // The shredder is never gated or delayed by any of the above.
             DrainTick();
         });
     }
@@ -909,6 +949,16 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
     /// reader never throws; a read error only surfaces as <see cref="HadReadError"/>. Runs UI-affine
     /// (posted through <see cref="_ui"/> by <see cref="OnPollerTick"/>), so it touches
     /// <see cref="Rows"/> directly.
+    ///
+    /// <para>Attribution (v1.3.0): ONE clock read per tick is the time base for everything below —
+    /// the candidate prune, the pending age-out, and the APPEND stamp each new row's correlation
+    /// window is anchored to. The pending (late-binding) rows are re-correlated FIRST, against the
+    /// lookup <see cref="OnPollerTick"/> has just merged this tick's batch into, and BEFORE the
+    /// nothing-drained early return — the batch that completes a row usually lands on a tick that
+    /// drains nothing new. Each new row is then correlated at append exactly as before; one left at
+    /// <see cref="UnknownAppLabel"/> joins the pending list. A tick that lands while logging is OFF
+    /// (one already in flight when "Stop &amp; clear" ran) still drains, but appends nothing — the
+    /// buffer, and with it the pending list, only ever accumulates while logging is on.</para>
     /// </summary>
     private void DrainTick()
     {
@@ -921,12 +971,28 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
         var drained = _reader.Drain();
         HadReadError = drained.HadReadError;
 
-        // Age out stale attribution candidates every tick so the lookup stays bounded and a
-        // long-gone process can never claim a fresh query.
-        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        // One clock read is this tick's time base: the prune, the pending age-out, and the append
+        // stamp (correlation anchor) of every row appended below. Age out stale attribution
+        // candidates every tick so the lookup stays bounded and a long-gone process can never claim
+        // a fresh query.
+        var nowMs = _clock().ToUnixTimeMilliseconds();
         PruneAttributions(nowMs);
 
+        // Late binding (v1.3.0): rows still showing "—" get another look now that this tick's batch
+        // is merged — before the early return, since that batch usually lands on a tick that drains
+        // nothing new.
+        RebindPendingAttributions(nowMs);
+
         if (drained.Lines.Count == 0)
+        {
+            return;
+        }
+
+        // A tick that lands after logging went off (one already in flight when "Stop & clear" ran)
+        // has still shredded above — the drain is never gated — but must not refill a buffer that
+        // exists only while logging is on: rows appended now would outlive the clear, and sit on the
+        // pending list with no tick left to age them out.
+        if (!LoggingEnabled)
         {
             return;
         }
@@ -937,7 +1003,15 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
         // on disable. Only the VISIBLE list is gated on active/not-paused (below).
         foreach (var line in drained.Lines)
         {
-            AppendRow(new QueryRowViewModel(line, ResolveAppFor(line.Name, nowMs)));
+            // Correlated at append around nowMs — this row's anchor for good — exactly as before; a
+            // row that comes up unknown waits on the pending list for its attribution to land.
+            var key = NormalizeQueryName(line.Name);
+            var row = new QueryRowViewModel(line, ResolveAppFor(key, nowMs));
+            AppendRow(row);
+            if (row.App == UnknownAppLabel && key.Length > 0)
+            {
+                TrackPendingAttribution(row, key, nowMs); // an empty key can never match: no slot.
+            }
         }
 
         // The DISPLAY (visible Rows) still only refreshes while the tab is active AND not paused, so
@@ -962,17 +1036,39 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
     /// correlation window — naming any one of them would be a guess (IC-16).</summary>
     internal const string MultipleAppsLabel = "multiple";
 
-    /// <summary>The ± correlation window around NOW. Rows are at most one poll (~750 ms) old when
-    /// appended, so 5 s comfortably absorbs the helper-capture→proxy-log→drain pipeline plus any
-    /// clock skew between the helper's stamps and this process — while staying narrow enough that
-    /// an old lookup of the same name cannot claim a fresh query.</summary>
-    private static readonly TimeSpan AttributionWindow = TimeSpan.FromSeconds(5);
+    // The correlation window is ASYMMETRIC around a row's anchor — its APPEND time, the clock read of
+    // the tick that drained it: [anchor − AttributionLookback, anchor + AttributionForwardSlack]. A
+    // query-log row exists only AFTER its lookup was answered, and it is anchored later still (when a
+    // tick drains it), so the lookup that produced the row was raised BEFORE the anchor; late binding
+    // only ever needs late-ARRIVING events from the past. A candidate stamped seconds AFTER the anchor
+    // can only be a DIFFERENT, later lookup of the same name (nslookup at t=0 raises no DNS-client
+    // event of its own; chrome resolving the same name at t=+3 s would otherwise claim the nslookup
+    // row) — a guess IC-16 forbids. At append time the forward edge changes nothing (no candidate
+    // stamped after the anchor exists yet); it only matters to the late-binding re-checks.
+
+    /// <summary>How far BEFORE a row's anchor a candidate may be stamped. Rows are at most one poll
+    /// (~750 ms) old when appended and an event reaches the helper within ETW's ~1 s flush, so 5 s
+    /// comfortably absorbs the capture→proxy-log→drain pipeline plus skew between the helper's
+    /// stamps and this process — while staying narrow enough that an old lookup of the same name
+    /// cannot claim a fresh query. The first check (at append) and every late-binding re-check judge
+    /// the SAME window around the SAME anchor, never around "now".</summary>
+    private static readonly TimeSpan AttributionLookback = TimeSpan.FromSeconds(5);
+
+    /// <summary>How far AFTER a row's anchor a candidate may be stamped: timestamp-jitter slack only
+    /// (helper and UI read the same machine clock), never room for a later lookup. Sound because the
+    /// helper stamps each candidate with WHEN THE LOOKUP HAPPENED — the ETW event's own timestamp
+    /// (<c>DnsAttributionWatcher.HandleQueryEvent</c>), not the moment its ~1 s flush batch was
+    /// delivered — so a row's own lookup is always stamped before the row's anchor.</summary>
+    private static readonly TimeSpan AttributionForwardSlack = TimeSpan.FromMilliseconds(500);
 
     /// <summary>How long merged candidates are retained before pruning — comfortably past the
-    /// correlation window (nothing older can ever match) while keeping the lookup small.</summary>
+    /// correlation window (nothing older can ever match) and past the late-binding horizon (a
+    /// pending row is re-checked at most <see cref="PendingAttributionLifetime"/> after its append,
+    /// against candidates stamped at most <see cref="AttributionLookback"/> before that append, so
+    /// none it could still match is ever older than 13 s), while keeping the lookup small.</summary>
     private static readonly TimeSpan AttributionRetention = TimeSpan.FromSeconds(30);
 
-    /// <summary>Per-name candidate cap: only the most recent few can fall inside the ±5 s window,
+    /// <summary>Per-name candidate cap: only the most recent few can fall inside the 5 s look-back,
     /// so keeping more would only serve stale data.</summary>
     private const int MaxAttributionCandidatesPerName = 4;
 
@@ -980,6 +1076,20 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
     /// 30 s prune keeps it far smaller in practice; past the cap new names are dropped (attribution
     /// is best-effort — bounded memory wins over completeness).</summary>
     private const int MaxAttributionNames = 2048;
+
+    /// <summary>How long a row appended as <see cref="UnknownAppLabel"/> waits on the late-binding
+    /// pending list. A candidate that can still match is stamped no later than
+    /// <see cref="AttributionForwardSlack"/> after the anchor, but it still has to reach the UI — ETW
+    /// hands the helper its events in ~1 s flush batches, the next poll fetches them, and a fetch is
+    /// skipped while a slow one is still in flight — so 8 s leaves a wide margin for a slow pipe.
+    /// Past it the row gives up and keeps the honest unknown for good.</summary>
+    internal static readonly TimeSpan PendingAttributionLifetime = TimeSpan.FromSeconds(8);
+
+    /// <summary>Hard cap on pending rows — bounded memory regardless of query volume (a heavy
+    /// 12.5 q/s of all-unknown rows keeps ~100 pending over the 8 s lifetime). Past it the OLDEST
+    /// pending row gives up first: it has had the longest to bind, while the newest is the one
+    /// whose attribution is likeliest still in flight.</summary>
+    internal const int MaxPendingAttributions = 256;
 
     /// <summary>The by-name attribution lookup (keys normalized: lowercase, trailing dot
     /// stripped). UI-thread-confined like every other piece of VM state. Pruned to ~30 s by the
@@ -992,6 +1102,20 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
     /// (mirroring the other internal observability seams here).</summary>
     internal int AttributionLookupCount => _attributionsByName.Count;
 
+    /// <summary>The late-binding pending list (v1.3.0): rows appended as <see cref="UnknownAppLabel"/>
+    /// whose attribution may still be in flight, oldest first — each with its normalized key and its
+    /// append stamp (the anchor its window is judged around). Bounded by
+    /// <see cref="MaxPendingAttributions"/> and <see cref="PendingAttributionLifetime"/>, always an
+    /// in-order subsequence of <see cref="_allRows"/> (a row the ring evicts leaves with it — see
+    /// <see cref="AppendRow"/>), UI-thread-confined, and dropped by <see cref="ClearView"/> with the
+    /// rest of the attribution residue.</summary>
+    private readonly List<PendingAttribution> _pendingAttributions = new();
+
+    /// <summary>Test seam: the number of rows currently awaiting a late binding — lets the tests
+    /// prove the pending list stays bounded and that disable/ClearView drop it (mirroring
+    /// <see cref="AttributionLookupCount"/>).</summary>
+    internal int PendingAttributionCount => _pendingAttributions.Count;
+
     /// <summary>The poll cursor: the last batch's <c>LastSeq</c>, sent back so each attribution
     /// entry crosses the pipe exactly once.</summary>
     private long _attributionAfterSeq;
@@ -999,6 +1123,15 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
     /// <summary>True while a fetch is awaiting the pipe — the next tick skips its fetch (never
     /// queues) so the shredder drain is never delayed by a slow helper.</summary>
     private bool _attributionFetchInFlight;
+
+    /// <summary>The attribution session epoch: bumped by every <see cref="ClearView"/> — and so by
+    /// "Stop &amp; clear" and the launch reset. A fetch captures it before awaiting the pipe, and its
+    /// batch is merged only if the epoch is unchanged AND logging is still on: a batch fetched before
+    /// a clear belongs to the session that was cleared, so it is dropped whole — never merged into the
+    /// emptied lookup, never moving the (possibly rewound) cursor. After a plain "Clear view" (logging
+    /// still on, cursor untouched) the next fetch simply re-requests those entries.
+    /// UI-thread-confined like the rest of the attribution state.</summary>
+    private long _attributionEpoch;
 
     /// <summary>Folds one fetched batch into the by-name lookup, newest-last (batches arrive
     /// oldest → newest), enforcing both bounds. Names are normalized so the ETW spelling (often
@@ -1057,28 +1190,95 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
         }
     }
 
-    /// <summary>Correlates one appended row against the lookup: candidates for the row's
-    /// normalized name within ±<see cref="AttributionWindow"/> of now. Exactly ONE distinct
-    /// process → its name (or a bare <c>PID n</c> when the name was unresolvable — the process
-    /// had exited at capture); more than one distinct process → <see cref="MultipleAppsLabel"/>;
-    /// none → <see cref="UnknownAppLabel"/>. Never guesses (IC-16).</summary>
-    private string ResolveAppFor(string rowName, long nowMs)
+    /// <summary>Puts a row that came up <see cref="UnknownAppLabel"/> at append on the pending list,
+    /// stamped with its append time. At the cap the OLDEST pending row gives up first and keeps the
+    /// honest unknown (see <see cref="MaxPendingAttributions"/>).</summary>
+    private void TrackPendingAttribution(QueryRowViewModel row, string key, long appendedAtMs)
     {
-        var key = NormalizeQueryName(rowName);
+        if (_pendingAttributions.Count >= MaxPendingAttributions)
+        {
+            _pendingAttributions.RemoveAt(0);
+        }
+
+        _pendingAttributions.Add(new PendingAttribution(row, key, appendedAtMs));
+    }
+
+    /// <summary>
+    /// Late binding (v1.3.0) — runs every tick, right after that tick's batch is merged. ETW
+    /// delivers a lookup's event in ~1 s flush batches, so the tick that drains its log line often
+    /// runs BEFORE the tick that fetches the event; deciding only at append would leave such rows
+    /// <see cref="UnknownAppLabel"/> forever even though the matching attribution lands a tick
+    /// later. So each pending row is re-correlated by <see cref="ResolveAppFor"/> around its APPEND
+    /// stamp (never "now" — the same window its first check used): a decision (one process → its
+    /// name or <c>PID n</c>; more than one → <see cref="MultipleAppsLabel"/>) is written into the
+    /// row via <see cref="QueryRowViewModel.TryBindApp"/> and the row leaves pending for good; no
+    /// match yet keeps it waiting; a row older than <see cref="PendingAttributionLifetime"/> —
+    /// measured in either direction, so a wall-clock step cannot pin it — gives up and keeps the
+    /// honest unknown. Never guesses, never revisits a decided row.
+    /// </summary>
+    private void RebindPendingAttributions(long nowMs)
+    {
+        if (_pendingAttributions.Count == 0)
+        {
+            return;
+        }
+
+        var lifetimeMs = (long)PendingAttributionLifetime.TotalMilliseconds;
+        List<(QueryRowViewModel Row, string App)>? decided = null;
+        _pendingAttributions.RemoveAll(pending =>
+        {
+            if (Math.Abs(nowMs - pending.AppendedAtMs) > lifetimeMs)
+            {
+                return true; // aged out: nothing that could still match is in flight any more.
+            }
+
+            var app = ResolveAppFor(pending.Key, pending.AppendedAtMs);
+            if (app == UnknownAppLabel)
+            {
+                return false; // nothing inside its window yet — keep waiting.
+            }
+
+            (decided ??= new()).Add((pending.Row, app));
+            return true; // decided — it leaves pending for good.
+        });
+
+        // Bind only once the list is compacted: each bind raises PropertyChanged (the cell updates in
+        // place), and no handler should ever observe a half-compacted pending list.
+        if (decided is not null)
+        {
+            foreach (var (row, app) in decided)
+            {
+                row.TryBindApp(app);
+            }
+        }
+    }
+
+    /// <summary>Correlates one row against the lookup: candidates for its normalized
+    /// <paramref name="key"/> stamped inside [<paramref name="anchorMs"/> − <see cref="AttributionLookback"/>,
+    /// <paramref name="anchorMs"/> + <see cref="AttributionForwardSlack"/>] — the anchor being the
+    /// row's APPEND stamp, both at append (where it is that tick's now and no later-stamped candidate
+    /// exists yet, so the result is exactly the append-time behaviour this always had) and on every
+    /// late-binding re-check. Only in-window candidates count: exactly ONE distinct process → its
+    /// name (or a bare <c>PID n</c> when the name was unresolvable — the process had exited at
+    /// capture); more than one distinct process → <see cref="MultipleAppsLabel"/>; none →
+    /// <see cref="UnknownAppLabel"/>. Never guesses (IC-16).</summary>
+    private string ResolveAppFor(string key, long anchorMs)
+    {
         if (key.Length == 0 || !_attributionsByName.TryGetValue(key, out var candidates))
         {
             return UnknownAppLabel;
         }
 
-        var windowMs = (long)AttributionWindow.TotalMilliseconds;
+        var earliestMs = anchorMs - (long)AttributionLookback.TotalMilliseconds;
+        var latestMs = anchorMs + (long)AttributionForwardSlack.TotalMilliseconds;
         var any = false;
         var matchedPid = 0;
         string? matchedName = null;
         foreach (var candidate in candidates)
         {
-            if (Math.Abs(nowMs - candidate.UnixTimeMs) > windowMs)
+            if (candidate.UnixTimeMs < earliestMs || candidate.UnixTimeMs > latestMs)
             {
-                continue;
+                continue; // outside the window — not a candidate, not even a rival one.
             }
 
             if (!any)
@@ -1115,18 +1315,40 @@ public sealed partial class QueryMonitorViewModel : ObservableObject, IDisposabl
     }
 
     /// <summary>One merged attribution candidate: who (pid + name resolved at capture) looked the
-    /// key name up, and when — the when drives both the ±window match and the 30 s prune.</summary>
+    /// key name up, and when — the when drives both the correlation-window match and the 30 s
+    /// prune.</summary>
     private readonly record struct AttributionCandidate(int ProcessId, string? ProcessName, long UnixTimeMs);
 
+    /// <summary>One late-binding pending row: the row itself (the SAME instance every surface holds,
+    /// so binding it updates them all in place), its normalized correlation key, and its append
+    /// stamp — the anchor of its correlation window and the start of its pending lifetime.</summary>
+    private readonly record struct PendingAttribution(QueryRowViewModel Row, string Key, long AppendedAtMs);
+
     /// <summary>Appends one row to the buffer, evicting the oldest past the <see cref="MaxRows"/> cap so
-    /// memory stays bounded (ring buffer). Does NOT rebuild the view — the caller batches that per tick.</summary>
+    /// memory stays bounded (ring buffer). An evicted row also leaves the late-binding pending list, so
+    /// the ring cap stays THE bound on rows held in memory (a frozen paused display may still show such
+    /// a row; it simply keeps the honest unknown). Does NOT rebuild the view — the caller batches that
+    /// per tick.</summary>
     private void AppendRow(QueryRowViewModel row)
     {
         _allRows.Add(row);
-        if (_allRows.Count > MaxRows)
+        var overflow = _allRows.Count - MaxRows;
+        if (overflow <= 0)
         {
-            _allRows.RemoveRange(0, _allRows.Count - MaxRows);
+            return;
         }
+
+        // Both lists are in append order and pending is a subsequence of the buffer, so a pending row
+        // being evicted is always at the pending head: one merge-walk over the evicted prefix.
+        for (var i = 0; i < overflow && _pendingAttributions.Count > 0; i++)
+        {
+            if (ReferenceEquals(_pendingAttributions[0].Row, _allRows[i]))
+            {
+                _pendingAttributions.RemoveAt(0);
+            }
+        }
+
+        _allRows.RemoveRange(0, overflow);
     }
 
     partial void OnSearchTextChanged(string value) => RefreshView();

@@ -28,12 +28,16 @@ public interface IQueryLogSession
     QueryLogStats Stats { get; }
 
     /// <summary>The most recent <paramref name="max"/> buffered rows, NEWEST FIRST (empty when off/empty).
-    /// A snapshot copy — safe to enumerate on the UI thread without racing the poller.</summary>
+    /// The LIST is a snapshot copy — safe to enumerate on the UI thread without racing the poller — but
+    /// the rows in it are the live, shared instances: a row's <see cref="QueryRowViewModel.App"/> may
+    /// still be late-bound in place after the snapshot is taken (it raises <c>PropertyChanged</c> on
+    /// the UI thread, so a binding to it updates by itself).</summary>
     IReadOnlyList<QueryRowViewModel> RecentRows(int max);
 
     /// <summary>Raised (on the UI dispatcher, so handlers are UI-affine) whenever the buffer changes or
     /// <see cref="LoggingActive"/> flips — a consumer re-reads <see cref="LoggingActive"/> /
-    /// <see cref="Stats"/> / <see cref="RecentRows"/> in response.</summary>
+    /// <see cref="Stats"/> / <see cref="RecentRows"/> in response. A late-bound App is NOT signalled
+    /// here (it changes no aggregate and no membership); the row itself notifies.</summary>
     event EventHandler? Changed;
 }
 

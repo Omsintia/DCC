@@ -377,7 +377,13 @@ internal sealed class DnsAttributionWatcher : IHostedService, IDisposable, IDnsA
                 return;
             }
 
-            HandleQueryEvent(data.ProcessID, queryName);
+            // The event's OWN time (3006 is raised when the calling process STARTS the lookup), not
+            // the moment this callback received it: real-time ETW delivers in ~1 s flush batches, so
+            // receipt time can trail the lookup by a second or more. The UI's correlation relies on
+            // "a row's own lookup is stamped before the row appeared" (it only looks a few hundred ms
+            // forward of a row); a receipt-time stamp would break that and leave genuine matches
+            // honest-but-wrongly "unknown".
+            HandleQueryEvent(data.ProcessID, queryName, new DateTimeOffset(data.TimeStamp.ToUniversalTime(), TimeSpan.Zero));
         }
         catch (Exception)
         {
@@ -385,11 +391,24 @@ internal sealed class DnsAttributionWatcher : IHostedService, IDisposable, IDnsA
         }
     }
 
-    /// <summary>The ETW-free capture path (also the test seam): resolves the process name NOW
-    /// (PID reuse makes a deferred lookup wrong) and appends to the ring.</summary>
-    internal void HandleQueryEvent(int processId, string queryName)
+    /// <summary>The largest plausible lag between a lookup and this callback receiving its event (the
+    /// flush batching plus slack). An event time outside [receipt − this, receipt + 2 s] means the
+    /// timestamp conversion is untrustworthy (clock change mid-session, a malformed header), so the
+    /// receipt time is used instead — it stays a sane, monotone-ish stamp either way.</summary>
+    private static readonly TimeSpan MaxPlausibleEventLag = TimeSpan.FromSeconds(60);
+
+    /// <summary>The ETW-free capture path (also the test seam): stamps the entry with the lookup's own
+    /// time when it is plausible (else receipt time — see <see cref="MaxPlausibleEventLag"/>), resolves
+    /// the process name NOW (PID reuse makes a deferred lookup wrong) and appends to the ring.</summary>
+    /// <param name="eventTimeUtc">When the lookup happened (the ETW event's timestamp, UTC); null =
+    /// unknown, stamp with receipt time.</param>
+    internal void HandleQueryEvent(int processId, string queryName, DateTimeOffset? eventTimeUtc = null)
     {
-        _ring.Add(_clock().ToUnixTimeMilliseconds(), processId, queryName, ResolveProcessName(processId));
+        var receipt = _clock();
+        var stamp = eventTimeUtc is { } evt && evt >= receipt - MaxPlausibleEventLag && evt <= receipt + TimeSpan.FromSeconds(2)
+            ? evt
+            : receipt;
+        _ring.Add(stamp.ToUnixTimeMilliseconds(), processId, queryName, ResolveProcessName(processId));
     }
 
     /// <summary>Per-PID name memo: resolving via <see cref="Process.GetProcessById"/> on every

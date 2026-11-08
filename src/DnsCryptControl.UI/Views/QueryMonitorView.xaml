@@ -66,7 +66,9 @@
                            Width="{Binding DataContext.ServerColumnWidth, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
                            Foreground="{DynamicResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
                 <!-- v1.3.0 per-app attribution: the originating app ("—" when unknown, "multiple" when
-                     ambiguous — the VM never guesses). Same fonts as Server. -->
+                     ambiguous — the VM never guesses). Same fonts as Server. App is observable: a row
+                     first shown "—" is late-bound in place when its attribution lands a tick or two
+                     later (OneWay binding; the row's setter is private). -->
                 <TextBlock Grid.Column="5" Text="{Binding App}" FontFamily="Consolas" FontSize="11"
                            Width="{Binding DataContext.AppColumnWidth, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
                            Foreground="{DynamicResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
