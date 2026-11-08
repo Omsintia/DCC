@@ -1135,7 +1135,10 @@ public sealed partial class AnonymizedDnsViewModel : ObservableObject, IDisposab
 
     /// <summary>Maps a save outcome onto the state surfaces (reload-first ordering, mirror ResolversViewModel).
     /// On a write-LANDED outcome (Applied/RestartFailed/ProxyRejected) the stash is persisted (never at toggle
-    /// time / never on Revert): the fresh doc's routes are stashed IFF the routes op wrote empty routes (disable).</summary>
+    /// time / never on Revert): the fresh doc's routes are stashed IFF the routes op wrote empty routes (disable).
+    /// Runs on a pool thread, so it never reads <c>_staged</c>: whether an edit made during the save is still
+    /// staged (skip the reload that would destroy it) comes back FROM the UI-thread removal itself
+    /// (<see cref="RemoveDispatchedOpsAsync"/>).</summary>
     private async Task ApplySaveOutcomeAsync(
         ConfigSaveOutcome outcome, IReadOnlyList<StagedOp> dispatched, IReadOnlyList<AnonRoute> freshRoutesBeforeWrite)
     {
@@ -1143,8 +1146,7 @@ public sealed partial class AnonymizedDnsViewModel : ObservableObject, IDisposab
         {
             case ConfigSaveOutcomeKind.Applied:
                 PersistStashIfDisable(dispatched, freshRoutesBeforeWrite);
-                RemoveDispatchedOps(dispatched);
-                if (_staged.Count == 0)
+                if (await RemoveDispatchedOpsAsync(dispatched).ConfigureAwait(false) == 0)
                 {
                     await LoadAsync(CancellationToken.None).ConfigureAwait(false);
                     _ui.Post(() =>
@@ -1171,8 +1173,7 @@ public sealed partial class AnonymizedDnsViewModel : ObservableObject, IDisposab
 
             case ConfigSaveOutcomeKind.RestartFailed:
                 PersistStashIfDisable(dispatched, freshRoutesBeforeWrite);
-                RemoveDispatchedOps(dispatched);
-                if (_staged.Count == 0)
+                if (await RemoveDispatchedOpsAsync(dispatched).ConfigureAwait(false) == 0)
                     await LoadAsync(CancellationToken.None).ConfigureAwait(false);
                 _ui.Post(() => RestartFailedMessage = outcome.Message
                     ?? "config saved, but the proxy restart failed — status unverified");
@@ -1180,8 +1181,7 @@ public sealed partial class AnonymizedDnsViewModel : ObservableObject, IDisposab
 
             case ConfigSaveOutcomeKind.ProxyRejected:
                 PersistStashIfDisable(dispatched, freshRoutesBeforeWrite);
-                RemoveDispatchedOps(dispatched);
-                if (_staged.Count == 0)
+                if (await RemoveDispatchedOpsAsync(dispatched).ConfigureAwait(false) == 0)
                     await LoadAsync(CancellationToken.None).ConfigureAwait(false);
                 _ui.Post(() => ProxyRejectedMessage = outcome.Message
                     ?? "new config rejected by proxy — Revert or re-edit");
@@ -1253,19 +1253,45 @@ public sealed partial class AnonymizedDnsViewModel : ObservableObject, IDisposab
         _stateStore.Save(state);
     }
 
-    private void RemoveDispatchedOps(IReadOnlyList<StagedOp> dispatched)
+    /// <summary>Removes EXACTLY the dispatched ops (write-landed; an op re-staged during the save is a new
+    /// instance and survives) and re-derives dirty/block/derived state, then completes with the number of
+    /// staged edits that REMAIN — the caller's "reload" vs "an edit made during the save is still unsaved" signal.
+    ///
+    /// <para>Threading contract: <c>_staged</c> is UI-thread-confined (IC-5), so the removal AND the count
+    /// happen inside ONE dispatcher post and the count travels back through the task. The caller runs on a
+    /// pool thread and must branch on that result, never re-read <c>_staged</c>: production's Post is
+    /// <c>Dispatcher.BeginInvoke</c>, so right after posting the removal has NOT run yet — reading the count
+    /// there made every normal save look edited-mid-flight and skip its post-save reload. The task runs its
+    /// continuations asynchronously, so the rest of the save resumes on the pool, never inline on the UI
+    /// thread; a fault inside the post faults the task (the save's <c>finally</c> still clears busy) instead
+    /// of stranding the save. An inline dispatcher (the unit tests) returns an already-completed task; a post
+    /// dropped at shutdown leaves it pending and the save simply stops — nothing is left to update.</para></summary>
+    private Task<int> RemoveDispatchedOpsAsync(IReadOnlyList<StagedOp> dispatched)
     {
+        var removed = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         _ui.Post(() =>
         {
-            foreach (var op in dispatched)
+            int remaining;
+            try
             {
-                if (_staged.TryGetValue(op.KeyPath, out var current) && ReferenceEquals(current, op))
-                    _staged.Remove(op.KeyPath);
+                foreach (var op in dispatched)
+                {
+                    if (_staged.TryGetValue(op.KeyPath, out var current) && ReferenceEquals(current, op))
+                        _staged.Remove(op.KeyPath);
+                }
+                IsDirty = _staged.Count > 0;
+                RecomputeSaveBlock();
+                RefreshDerivedState();
+                remaining = _staged.Count;
             }
-            IsDirty = _staged.Count > 0;
-            RecomputeSaveBlock();
-            RefreshDerivedState();
+            catch (Exception ex)
+            {
+                removed.SetException(ex);
+                return;
+            }
+            removed.SetResult(remaining);
         });
+        return removed.Task;
     }
 
     [RelayCommand(CanExecute = nameof(CanRevert))]
