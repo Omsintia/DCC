@@ -1,4 +1,7 @@
+using System.ComponentModel;
 using DnsCryptControl.Core.QueryLog;
+using DnsCryptControl.Ipc.Commands;
+using DnsCryptControl.UI.Models;
 using DnsCryptControl.UI.Services;
 using DnsCryptControl.UI.ViewModels;
 
@@ -103,16 +106,88 @@ public class QueryMonitorViewModelTests
         public void Fire() => Tick?.Invoke(this, EventArgs.Empty);
     }
 
+    private sealed class FakeUiStateStore : IUiStateStore
+    {
+        public UiState ToLoad { get; set; } = new();
+        public UiState Saved { get; private set; } = new();
+        public int SaveCount { get; private set; }
+
+        public UiState Load() => ToLoad;
+
+        public void Save(UiState state)
+        {
+            Saved = state;
+            SaveCount++;
+        }
+    }
+
+    /// <summary>Scriptable per-tick attribution seam (v1.3.0): each fetch dequeues one scripted
+    /// batch (falling back to <see cref="NextBatch"/> — default null, i.e. the degraded/no-data
+    /// case, so pre-existing tests exercise the honest "—" path) and records the afterSeq cursor.
+    /// Always a completed Task, so ticks stay synchronous end-to-end (zero wall-clock waits).</summary>
+    private sealed class FakeAttributionReader : IDnsAttributionReader
+    {
+        public Queue<DnsAttributionBatch?> BatchQueue { get; } = new();
+        public DnsAttributionBatch? NextBatch { get; set; }
+        public List<long> FetchCalls { get; } = new();
+
+        /// <summary>One-shot: when set, the NEXT fetch returns this gate's task instead of a completed
+        /// one, so a test can hold a fetch in flight across a Stop &amp; clear and complete it after.
+        /// A plain TaskCompletionSource runs the VM's ConfigureAwait(false) continuation inline on
+        /// SetResult, so the late continuation has run by the time SetResult returns — zero sleeps.</summary>
+        public TaskCompletionSource<DnsAttributionBatch?>? Gate { get; set; }
+
+        public Task<DnsAttributionBatch?> FetchAsync(long afterSeq, CancellationToken ct)
+        {
+            FetchCalls.Add(afterSeq);
+            if (Gate is { } gate)
+            {
+                Gate = null;
+                return gate.Task;
+            }
+
+            var batch = BatchQueue.Count > 0 ? BatchQueue.Dequeue() : NextBatch;
+            return Task.FromResult(batch);
+        }
+
+        public void Enqueue(long lastSeq, params DnsAttributionEntry[] entries) =>
+            BatchQueue.Enqueue(new DnsAttributionBatch(lastSeq, entries));
+    }
+
+    /// <summary>A hand-advanced UTC clock for the late-binding tests: the VM's clock seam reads
+    /// <see cref="Now"/>, so the pending-lifetime and window-anchor tests move time by exactly what
+    /// they name — zero wall-clock sleeps. Starts at a fixed instant so every stamp is deterministic.</summary>
+    private sealed class ManualClock
+    {
+        private DateTimeOffset _now = new(2026, 7, 3, 10, 24, 59, TimeSpan.Zero);
+
+        public DateTimeOffset Now() => _now;
+
+        public long NowMs => _now.ToUnixTimeMilliseconds();
+
+        public void Advance(TimeSpan by) => _now += by;
+    }
+
     private sealed class Harness : IDisposable
     {
         public FakeConfigFileService Config { get; } = new();
         public FakeQueryLogReader Reader { get; } = new();
         public FakeQueryPoller Poller { get; } = new();
+        public FakeUiStateStore UiState { get; } = new();
+        public FakeAttributionReader Attribution { get; } = new();
         public QueryMonitorViewModel Vm { get; }
 
-        public Harness()
+        /// <param name="clock">The VM's clock seam; null = the real clock (every pre-late-binding test
+        /// runs exactly as before, stamping entries with the real now).</param>
+        public Harness(UiState? initialUiState = null, Func<DateTimeOffset>? clock = null)
         {
-            Vm = new QueryMonitorViewModel(Config, Reader, Poller, new SynchronousDispatcher());
+            if (initialUiState is not null)
+            {
+                UiState.ToLoad = initialUiState;
+            }
+
+            Vm = new QueryMonitorViewModel(
+                Config, Reader, Poller, new SynchronousDispatcher(), UiState, Attribution, clock: clock);
         }
 
         public void Dispose() => Vm.Dispose();
@@ -121,6 +196,112 @@ public class QueryMonitorViewModelTests
     private static QueryLogLine Line(
         string name, QueryAction action = QueryAction.Pass, string type = "A", string time = "[2026-07-03 10:24:59]") =>
         new(time, "127.0.0.1", name, type, action, 12, action is QueryAction.Pass ? "cloudflare" : "-", "-");
+
+    // ------------------------------------------------------------------ column layout (resizable headers)
+
+    [Fact]
+    public void ctor_seeds_column_widths_from_persisted_state()
+    {
+        using var h = new Harness(new UiState
+        {
+            QueryMonitorColumns = new UiQueryMonitorColumns { Time = 100, Type = 40, Action = 90, Latency = 70, Server = 300, App = 130 },
+        });
+
+        Assert.Equal(100, h.Vm.TimeColumnWidth);
+        Assert.Equal(40, h.Vm.TypeColumnWidth);
+        Assert.Equal(90, h.Vm.ActionColumnWidth);
+        Assert.Equal(70, h.Vm.LatencyColumnWidth);
+        Assert.Equal(300, h.Vm.ServerColumnWidth);
+        Assert.Equal(130, h.Vm.AppColumnWidth);
+    }
+
+    [Fact]
+    public void ctor_clamps_hand_edited_widths_to_the_grabbable_range()
+    {
+        // A hand-edited ui-state.json must never produce an ungrabbable (0-width) or runaway column.
+        using var h = new Harness(new UiState
+        {
+            QueryMonitorColumns = new UiQueryMonitorColumns { Time = 0, Type = -50, Action = 5000, Latency = double.NaN, Server = double.PositiveInfinity, App = -1 },
+        });
+
+        Assert.Equal(QueryMonitorViewModel.MinColumnWidth, h.Vm.TimeColumnWidth);
+        Assert.Equal(QueryMonitorViewModel.MinColumnWidth, h.Vm.TypeColumnWidth);
+        Assert.Equal(QueryMonitorViewModel.MaxColumnWidth, h.Vm.ActionColumnWidth);
+        Assert.Equal(QueryMonitorViewModel.MinColumnWidth, h.Vm.LatencyColumnWidth);
+        Assert.Equal(QueryMonitorViewModel.MinColumnWidth, h.Vm.ServerColumnWidth);
+        Assert.Equal(QueryMonitorViewModel.MinColumnWidth, h.Vm.AppColumnWidth);
+    }
+
+    [Fact]
+    public void app_column_resizes_clamps_and_persists_like_the_others()
+    {
+        // v1.3.0: the App column is a full member of the resizable-column set — same clamp arms,
+        // same commit path.
+        using var h = new Harness();
+        var start = h.Vm.AppColumnWidth;
+
+        h.Vm.ResizeColumn(QueryMonitorColumn.App, 30);
+        Assert.Equal(start + 30, h.Vm.AppColumnWidth);
+
+        h.Vm.ResizeColumn(QueryMonitorColumn.App, -10_000);
+        Assert.Equal(QueryMonitorViewModel.MinColumnWidth, h.Vm.AppColumnWidth);
+
+        h.Vm.CommitColumnWidths();
+        Assert.Equal(1, h.UiState.SaveCount);
+        Assert.Equal(h.Vm.AppColumnWidth, h.UiState.Saved.QueryMonitorColumns.App);
+    }
+
+    [Fact]
+    public void resize_column_applies_the_delta_and_clamps_at_both_ends()
+    {
+        using var h = new Harness();
+        var start = h.Vm.ServerColumnWidth;
+
+        h.Vm.ResizeColumn(QueryMonitorColumn.Server, 40);
+        Assert.Equal(start + 40, h.Vm.ServerColumnWidth);
+
+        h.Vm.ResizeColumn(QueryMonitorColumn.Server, -10_000);
+        Assert.Equal(QueryMonitorViewModel.MinColumnWidth, h.Vm.ServerColumnWidth);
+
+        h.Vm.ResizeColumn(QueryMonitorColumn.Server, 10_000);
+        Assert.Equal(QueryMonitorViewModel.MaxColumnWidth, h.Vm.ServerColumnWidth);
+
+        // No persistence during the drag — only CommitColumnWidths (drag end) saves.
+        Assert.Equal(0, h.UiState.SaveCount);
+    }
+
+    [Fact]
+    public void commit_column_widths_persists_the_current_widths_once()
+    {
+        using var h = new Harness();
+        h.Vm.ResizeColumn(QueryMonitorColumn.Server, 60);
+        h.Vm.ResizeColumn(QueryMonitorColumn.Time, -20);
+
+        h.Vm.CommitColumnWidths();
+
+        Assert.Equal(1, h.UiState.SaveCount);
+        Assert.Equal(h.Vm.ServerColumnWidth, h.UiState.Saved.QueryMonitorColumns.Server);
+        Assert.Equal(h.Vm.TimeColumnWidth, h.UiState.Saved.QueryMonitorColumns.Time);
+    }
+
+    [Fact]
+    public void commit_column_widths_does_not_clobber_other_persisted_preferences()
+    {
+        // Commit loads FRESH state and replaces only the column block — the favorites, theme, and the
+        // kill-switch opt-in another VM persisted must survive a width save from this one.
+        using var h = new Harness(new UiState
+        {
+            Favorites = { "quad9-dnscrypt-ip4-filter-pri" },
+            Theme = "Dark",
+            KillSwitchOptIn = true,
+        });
+
+        h.Vm.CommitColumnWidths();
+
+        Assert.Equal(new[] { "quad9-dnscrypt-ip4-filter-pri" }, h.UiState.Saved.Favorites);
+        Assert.Equal("Dark", h.UiState.Saved.Theme);
+        Assert.True(h.UiState.Saved.KillSwitchOptIn);
+    }
 
     // ------------------------------------------------------------------ off by default (IC-QM1)
 
@@ -685,6 +866,732 @@ public class QueryMonitorViewModelTests
         Assert.Equal(0, session.Stats.Queries);
     }
 
+    // ------------------------------------------------------------------ per-app attribution (v1.3.0)
+
+    [Fact]
+    public async Task row_with_a_matching_attribution_gets_the_process_name_normalized()
+    {
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        // The ETW spelling is FQDN-dotted + differently cased — normalization must still match.
+        h.Attribution.Enqueue(1, Entry(1, "ADS.Example.COM.", pid: 100, processName: "chrome"));
+        h.Reader.Enqueue(Line("ads.example.com"));
+        h.Poller.Fire();
+
+        Assert.Equal("chrome", Assert.Single(h.Vm.Rows).App);
+    }
+
+    [Fact]
+    public async Task row_with_no_matching_attribution_shows_the_honest_unknown()
+    {
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        h.Attribution.Enqueue(1, Entry(1, "other.example", pid: 100, processName: "chrome"));
+        h.Reader.Enqueue(Line("unrelated.example"));
+        h.Poller.Fire();
+
+        Assert.Equal(QueryMonitorViewModel.UnknownAppLabel, Assert.Single(h.Vm.Rows).App);
+    }
+
+    [Fact]
+    public async Task two_distinct_processes_in_the_window_show_multiple_never_a_guess()
+    {
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        // Two PIDs — even with the SAME image name — make the row ambiguous (IC-16: never guess).
+        h.Attribution.Enqueue(2,
+            Entry(1, "shared.example", pid: 100, processName: "chrome"),
+            Entry(2, "shared.example", pid: 200, processName: "chrome"));
+        h.Reader.Enqueue(Line("shared.example"));
+        h.Poller.Fire();
+
+        Assert.Equal(QueryMonitorViewModel.MultipleAppsLabel, Assert.Single(h.Vm.Rows).App);
+    }
+
+    [Fact]
+    public async Task attribution_fetch_failure_degrades_to_unknown_and_never_throws()
+    {
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        // The reader's default (NextBatch = null) IS the degraded transport: the tick must still
+        // drain, append, and label honestly.
+        h.Reader.Enqueue(Line("a.example"));
+        h.Poller.Fire(); // must not throw
+
+        Assert.Equal(QueryMonitorViewModel.UnknownAppLabel, Assert.Single(h.Vm.Rows).App);
+        Assert.Single(h.Attribution.FetchCalls); // the fetch DID run — its failure just degraded
+    }
+
+    [Fact]
+    public async Task exited_process_with_no_name_falls_back_to_the_bare_pid()
+    {
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        h.Attribution.Enqueue(1, Entry(1, "gone.example", pid: 1234, processName: null));
+        h.Reader.Enqueue(Line("gone.example"));
+        h.Poller.Fire();
+
+        Assert.Equal("PID 1234", Assert.Single(h.Vm.Rows).App);
+    }
+
+    [Fact]
+    public async Task stale_attribution_outside_the_window_does_not_claim_a_fresh_query()
+    {
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        // Same name, but captured 10 s ago — retained (< 30 s) yet past the 5 s look-back, so a
+        // long-gone lookup can never label a fresh query.
+        h.Attribution.Enqueue(1, Entry(1, "old.example", pid: 100, processName: "chrome", unixMs: NowMs() - 10_000));
+        h.Reader.Enqueue(Line("old.example"));
+        h.Poller.Fire();
+
+        Assert.Equal(QueryMonitorViewModel.UnknownAppLabel, Assert.Single(h.Vm.Rows).App);
+    }
+
+    [Fact]
+    public async Task attribution_cursor_advances_by_the_batch_LastSeq_each_tick()
+    {
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        h.Attribution.Enqueue(7, Entry(7, "a.example", pid: 100, processName: "chrome"));
+        h.Reader.Enqueue(Line("a.example"));
+        h.Poller.Fire();
+
+        h.Reader.Enqueue(Line("b.example"));
+        h.Poller.Fire(); // second fetch (unscripted default: empty batch is fine)
+
+        Assert.Equal(2, h.Attribution.FetchCalls.Count);
+        Assert.Equal(0, h.Attribution.FetchCalls[0]);  // first poll starts from the beginning
+        Assert.Equal(7, h.Attribution.FetchCalls[1]);  // then resumes after the last seen seq
+    }
+
+    [Fact]
+    public async Task attribution_merged_on_an_earlier_tick_still_correlates_a_row_arriving_the_next_tick()
+    {
+        // The ETW event fires when the app CALLS the resolver; the proxy log line lands up to a
+        // poll later. A candidate merged on tick N must still match a row appended on tick N+1
+        // (stamped before that row's anchor, inside its 5 s look-back).
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        h.Attribution.Enqueue(1, Entry(1, "lag.example", pid: 100, processName: "firefox"));
+        h.Poller.Fire(); // merge only — nothing drained this tick
+
+        h.Reader.Enqueue(Line("lag.example"));
+        h.Poller.Fire(); // the row arrives one tick later
+
+        Assert.Equal("firefox", Assert.Single(h.Vm.Rows).App);
+    }
+
+    [Fact]
+    public async Task disable_clears_the_attribution_lookup_and_rewinds_the_cursor()
+    {
+        // OPSEC residue (FIX D): the domain→process lookup is pruned only on poller ticks, so
+        // "Stop & clear" must drop it explicitly — otherwise the final ~30 s of pairs sit in
+        // memory for the rest of the app session after the ticks stop. A fresh consent also
+        // starts a fresh cursor (the helper's ring is cleared when its capture session stops).
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        h.Attribution.Enqueue(3, Entry(3, "residue.example", pid: 100, processName: "chrome"));
+        h.Reader.Enqueue(Line("residue.example"));
+        h.Poller.Fire();
+        Assert.Equal(1, h.Vm.AttributionLookupCount);
+
+        h.Config.LoadQueue.Enqueue(ConfigLoadResult.Ok("[query_log]\nfile = 'x'\n", Sha));
+        await h.Vm.DisableAsync(CancellationToken.None);
+
+        Assert.Equal(0, h.Vm.AttributionLookupCount); // no domain→process residue survives the stop
+
+        // The rewound cursor: a re-enabled session's first fetch starts from 0, not the old seq.
+        h.Config.LoadQueue.Enqueue(ConfigLoadResult.Ok(string.Empty, Sha));
+        h.Vm.RequestEnable();
+        await h.Vm.ConfirmEnableAsync(CancellationToken.None);
+        h.Poller.Fire();
+
+        Assert.Equal(0, h.Attribution.FetchCalls[^1]);
+    }
+
+    [Fact]
+    public async Task clear_view_drops_the_attribution_lookup_with_the_rows()
+    {
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+
+        h.Attribution.Enqueue(1, Entry(1, "residue.example", pid: 100, processName: "chrome"));
+        h.Reader.Enqueue(Line("residue.example"));
+        h.Poller.Fire();
+        Assert.Equal(1, h.Vm.AttributionLookupCount);
+
+        h.Vm.ClearView();
+
+        Assert.Empty(h.Vm.Rows);
+        Assert.Equal(0, h.Vm.AttributionLookupCount); // the lookup is the same residue, one join away
+    }
+
+    [Fact]
+    public void no_attribution_fetch_while_logging_is_off()
+    {
+        // The polls are the helper's demand signal for machine-wide ETW capture — a tick that
+        // somehow fires while logging is off must NOT poll (no unconsented demand).
+        using var h = new Harness();
+
+        h.Poller.Fire();
+
+        Assert.Empty(h.Attribution.FetchCalls);
+    }
+
+    // ------------------------------------------------------------------ late binding (v1.3.0)
+
+    [Fact]
+    public async Task a_row_drained_before_its_attribution_is_late_bound_when_the_batch_lands_next_tick()
+    {
+        // The flaw this pins: ETW hands the helper its events in ~1 s flush batches, so the tick that
+        // drains a lookup's log line usually runs BEFORE the tick that fetches that lookup's event.
+        // Deciding App once at append time left such rows "—" forever.
+        var clock = new ManualClock();
+        using var h = new Harness(clock: clock.Now);
+        await EnableAndActivateAsync(h);
+        var anchorMs = clock.NowMs;
+
+        h.Reader.Enqueue(Line("late.example"));
+        h.Poller.Fire(); // tick N: the row is drained; its attribution has not been fetched yet
+        var row = Assert.Single(h.Vm.Rows);
+        Assert.Equal(QueryMonitorViewModel.UnknownAppLabel, row.App);
+
+        clock.Advance(TimeSpan.FromMilliseconds(750));
+        h.Attribution.Enqueue(1, Entry(1, "late.example", pid: 100, processName: "chrome", unixMs: anchorMs - 200));
+        h.Poller.Fire(); // tick N+1: the batch lands; nothing new is drained
+
+        Assert.Equal("chrome", row.App);
+    }
+
+    [Fact]
+    public async Task a_late_bound_row_notifies_App_so_every_surface_bound_to_it_updates_in_place()
+    {
+        // The Query Monitor cell binds {Binding App} on the row instance the Dashboard's recent list
+        // also holds: without a change notification the cell keeps painting "—" after the VM has the
+        // answer. Exactly one notification, for App alone (no other cell ever changes).
+        var clock = new ManualClock();
+        using var h = new Harness(clock: clock.Now);
+        await EnableAndActivateAsync(h);
+        var anchorMs = clock.NowMs;
+        h.Reader.Enqueue(Line("late.example"));
+        h.Poller.Fire();
+        var row = Assert.Single(h.Vm.Rows);
+        var notifier = Assert.IsAssignableFrom<INotifyPropertyChanged>(row);
+        var changed = new List<string?>();
+        notifier.PropertyChanged += (_, e) => changed.Add(e.PropertyName);
+
+        clock.Advance(TimeSpan.FromMilliseconds(750));
+        h.Attribution.Enqueue(1, Entry(1, "late.example", pid: 100, processName: "chrome", unixMs: anchorMs - 200));
+        h.Poller.Fire();
+
+        Assert.Equal(new[] { "App" }, changed);
+        Assert.Equal("chrome", Assert.Single(h.Vm.RecentRows(5)).App); // the Dashboard's view agrees
+    }
+
+    [Fact]
+    public async Task late_binding_keeps_completing_rows_while_the_tab_is_inactive_or_paused()
+    {
+        // The buffer keeps accumulating while the tab is away or paused (Phase 5i), so its rows must
+        // keep completing too — re-entering the tab must not show "—" for attributions that landed
+        // while the display was away.
+        var clock = new ManualClock();
+        using var h = new Harness(clock: clock.Now);
+        await EnableAndActivateAsync(h);
+        h.Vm.IsActive = false;
+        var awayAnchorMs = clock.NowMs;
+        h.Reader.Enqueue(Line("away.example"));
+        h.Poller.Fire();
+        clock.Advance(TimeSpan.FromMilliseconds(750));
+        h.Attribution.Enqueue(1, Entry(1, "away.example", pid: 100, processName: "chrome", unixMs: awayAnchorMs - 200));
+        h.Poller.Fire();
+
+        h.Vm.IsActive = true; // re-entering refreshes the display from the buffer
+        Assert.Equal("chrome", Assert.Single(h.Vm.Rows).App);
+
+        h.Vm.Pause();
+        var pausedAnchorMs = clock.NowMs;
+        h.Reader.Enqueue(Line("paused.example"));
+        h.Poller.Fire();
+        clock.Advance(TimeSpan.FromMilliseconds(750));
+        h.Attribution.Enqueue(2, Entry(2, "paused.example", pid: 200, processName: "msedge", unixMs: pausedAnchorMs - 200));
+        h.Poller.Fire();
+        Assert.Equal("msedge", h.Vm.RecentRows(1)[0].App); // the buffered row completed while frozen out
+    }
+
+    [Fact]
+    public void a_rows_App_binds_one_way_from_the_unknown_and_never_again()
+    {
+        // The row's own contract — "never downgrade, never re-decide" holds by construction, not
+        // only by the VM's pending-list bookkeeping: only a row still showing the honest unknown can
+        // bind, the unknown itself is no decision, and a decided row refuses every later one.
+        var row = new QueryRowViewModel(Line("x.example"));
+
+        Assert.False(row.TryBindApp(QueryMonitorViewModel.UnknownAppLabel));
+        Assert.True(row.TryBindApp("chrome"));
+        Assert.False(row.TryBindApp(QueryMonitorViewModel.MultipleAppsLabel));
+        Assert.False(row.TryBindApp("edge"));
+        Assert.Equal("chrome", row.App);
+
+        var decidedAtAppend = new QueryRowViewModel(Line("y.example"), "firefox");
+        Assert.False(decidedAtAppend.TryBindApp("chrome"));
+        Assert.Equal("firefox", decidedAtAppend.App);
+    }
+
+    [Fact]
+    public async Task late_binding_judges_the_window_around_the_rows_append_time_not_now()
+    {
+        // A pending row re-checked 7 s after it was appended must still be judged around WHEN it was
+        // appended: an attribution stamped 0.5 s BEFORE the append binds (though it is 7.5 s before
+        // "now"), while one stamped 6.5 s AFTER the append does not (though it is just 0.5 s before
+        // "now"). A window that drifted with the clock would get both backwards.
+        var clock = new ManualClock();
+        using var h = new Harness(clock: clock.Now);
+        await EnableAndActivateAsync(h);
+        var appendedAtMs = clock.NowMs;
+        h.Reader.Enqueue(Line("anchored.example"), Line("drifted.example"));
+        h.Poller.Fire();
+        var anchored = h.Vm.Rows.Single(r => r.Name == "anchored.example");
+        var drifted = h.Vm.Rows.Single(r => r.Name == "drifted.example");
+
+        var recheckAfter = TimeSpan.FromSeconds(7);
+        Assert.True(recheckAfter < QueryMonitorViewModel.PendingAttributionLifetime); // both still pending
+        clock.Advance(recheckAfter);
+        h.Attribution.Enqueue(2,
+            Entry(1, "anchored.example", pid: 100, processName: "chrome", unixMs: appendedAtMs - 500),
+            Entry(2, "drifted.example", pid: 200, processName: "edge", unixMs: appendedAtMs + 6_500));
+        h.Poller.Fire();
+
+        Assert.Equal("chrome", anchored.App);
+        Assert.Equal(QueryMonitorViewModel.UnknownAppLabel, drifted.App);
+    }
+
+    [Fact]
+    public async Task an_attribution_stamped_after_the_rows_anchor_never_late_binds_it()
+    {
+        // A query-log row exists only after its lookup was answered, so the lookup that produced it
+        // was raised BEFORE the row's anchor; a candidate stamped seconds AFTER the anchor can only be
+        // a DIFFERENT, later lookup of the same name. E.g. nslookup (no DNS-client event of its own)
+        // queries at t=0 and chrome resolves the same name at t=+3 s: binding the nslookup row to
+        // chrome would be a guess (IC-16).
+        var clock = new ManualClock();
+        using var h = new Harness(clock: clock.Now);
+        await EnableAndActivateAsync(h);
+        var anchorMs = clock.NowMs;
+        h.Reader.Enqueue(Line("shared.example"));
+        h.Poller.Fire(); // the nslookup row: appended, nothing to bind it to
+        var row = Assert.Single(h.Vm.Rows);
+
+        clock.Advance(TimeSpan.FromSeconds(3.75)); // chrome's +3 s lookup is fetched a tick later
+        h.Attribution.Enqueue(1, Entry(1, "shared.example", pid: 100, processName: "chrome", unixMs: anchorMs + 3_000));
+        h.Poller.Fire();
+
+        Assert.Equal(QueryMonitorViewModel.UnknownAppLabel, row.App);
+    }
+
+    [Fact]
+    public async Task an_attribution_stamped_just_after_the_anchor_binds_within_the_jitter_slack()
+    {
+        // The forward edge is not zero: a few hundred ms of helper/UI timestamp jitter must not cost a
+        // row its own lookup.
+        var clock = new ManualClock();
+        using var h = new Harness(clock: clock.Now);
+        await EnableAndActivateAsync(h);
+        var anchorMs = clock.NowMs;
+        h.Reader.Enqueue(Line("jitter.example"));
+        h.Poller.Fire();
+        var row = Assert.Single(h.Vm.Rows);
+
+        clock.Advance(TimeSpan.FromMilliseconds(750));
+        h.Attribution.Enqueue(1, Entry(1, "jitter.example", pid: 100, processName: "chrome", unixMs: anchorMs + 300));
+        h.Poller.Fire();
+
+        Assert.Equal("chrome", row.App);
+    }
+
+    [Fact]
+    public async Task a_lookup_stamped_well_before_the_anchor_still_binds_when_it_arrives_ticks_later()
+    {
+        // The case late binding exists for: an event stamped BEFORE the row's anchor that only reaches
+        // the UI ticks after the row. Anywhere inside the 5 s look-back it still binds — here 4.5 s
+        // back, fetched three ticks late.
+        var clock = new ManualClock();
+        using var h = new Harness(clock: clock.Now);
+        await EnableAndActivateAsync(h);
+        var anchorMs = clock.NowMs;
+        h.Reader.Enqueue(Line("backward.example"));
+        h.Poller.Fire();
+        var row = Assert.Single(h.Vm.Rows);
+
+        clock.Advance(TimeSpan.FromMilliseconds(750));
+        h.Poller.Fire();
+        clock.Advance(TimeSpan.FromMilliseconds(750));
+        h.Poller.Fire();
+        Assert.Equal(QueryMonitorViewModel.UnknownAppLabel, row.App); // still waiting
+
+        clock.Advance(TimeSpan.FromMilliseconds(750));
+        h.Attribution.Enqueue(1, Entry(1, "backward.example", pid: 100, processName: "chrome", unixMs: anchorMs - 4_500));
+        h.Poller.Fire();
+
+        Assert.Equal("chrome", row.App);
+    }
+
+    [Fact]
+    public async Task multiple_counts_only_candidates_inside_the_window()
+    {
+        // Ambiguity is judged over the window alone: another process's lookup stamped 3 s AFTER the
+        // anchor (a later lookup), or 6 s before it (past the look-back), is no rival candidate — the
+        // one in-window process names the row rather than "multiple".
+        var clock = new ManualClock();
+        using var h = new Harness(clock: clock.Now);
+        await EnableAndActivateAsync(h);
+        var anchorMs = clock.NowMs;
+        h.Reader.Enqueue(Line("crowded.example"));
+        h.Poller.Fire();
+        var row = Assert.Single(h.Vm.Rows);
+
+        clock.Advance(TimeSpan.FromSeconds(3.75));
+        h.Attribution.Enqueue(3,
+            Entry(1, "crowded.example", pid: 300, processName: "firefox", unixMs: anchorMs - 6_000),
+            Entry(2, "crowded.example", pid: 100, processName: "chrome", unixMs: anchorMs - 1_000),
+            Entry(3, "crowded.example", pid: 200, processName: "msedge", unixMs: anchorMs + 3_000));
+        h.Poller.Fire();
+
+        Assert.Equal("chrome", row.App);
+    }
+
+    [Fact]
+    public async Task two_processes_landing_late_in_the_window_late_bind_multiple_never_a_guess()
+    {
+        // Late binding runs the same ambiguity rule as append time: two distinct PIDs inside the
+        // row's window make it "multiple" — never whichever of them happened to be merged first.
+        var clock = new ManualClock();
+        using var h = new Harness(clock: clock.Now);
+        await EnableAndActivateAsync(h);
+        var anchorMs = clock.NowMs;
+        h.Reader.Enqueue(Line("shared.example"));
+        h.Poller.Fire();
+        var row = Assert.Single(h.Vm.Rows);
+
+        clock.Advance(TimeSpan.FromMilliseconds(750));
+        h.Attribution.Enqueue(2,
+            Entry(1, "shared.example", pid: 100, processName: "chrome", unixMs: anchorMs - 300),
+            Entry(2, "shared.example", pid: 200, processName: "msedge", unixMs: anchorMs - 100));
+        h.Poller.Fire();
+
+        Assert.Equal(QueryMonitorViewModel.MultipleAppsLabel, row.App);
+        Assert.Equal(0, h.Vm.PendingAttributionCount); // "multiple" is a decision — it leaves pending
+    }
+
+    [Fact]
+    public async Task a_decided_row_is_never_changed_by_later_batches()
+    {
+        // Never downgrade, never re-decide: a row named at append time AND a row late-bound on the
+        // next tick both keep their first decision when a different process's lookup of the same
+        // name lands later (still inside their windows) — neither so much as raises a notification.
+        var clock = new ManualClock();
+        using var h = new Harness(clock: clock.Now);
+        await EnableAndActivateAsync(h);
+        var anchorMs = clock.NowMs; // both rows are appended by the first tick below
+        h.Attribution.Enqueue(1, Entry(1, "early.example", pid: 100, processName: "chrome", unixMs: anchorMs - 400));
+        h.Reader.Enqueue(Line("early.example"), Line("late.example"));
+        h.Poller.Fire();
+        var early = h.Vm.Rows.Single(r => r.Name == "early.example");
+        var late = h.Vm.Rows.Single(r => r.Name == "late.example");
+        Assert.Equal("chrome", early.App);             // decided at append, exactly as before
+        Assert.Equal(1, h.Vm.PendingAttributionCount); // so only the unknown row waits
+
+        clock.Advance(TimeSpan.FromMilliseconds(750));
+        h.Attribution.Enqueue(2, Entry(2, "late.example", pid: 300, processName: "firefox", unixMs: anchorMs - 200));
+        h.Poller.Fire();
+        Assert.Equal("firefox", late.App);
+
+        var notifications = 0;
+        early.PropertyChanged += (_, _) => notifications++;
+        late.PropertyChanged += (_, _) => notifications++;
+        clock.Advance(TimeSpan.FromMilliseconds(750));
+        h.Attribution.Enqueue(4,
+            Entry(3, "early.example", pid: 200, processName: "msedge", unixMs: anchorMs - 100),
+            Entry(4, "late.example", pid: 400, processName: "msedge", unixMs: anchorMs - 100));
+        h.Poller.Fire();
+
+        Assert.Equal("chrome", early.App);
+        Assert.Equal("firefox", late.App);
+        Assert.Equal(0, notifications);
+    }
+
+    [Fact]
+    public async Task a_row_whose_name_can_never_match_takes_no_pending_slot()
+    {
+        // A root query "." normalizes to an empty key, which the merge never stores — it can never be
+        // attributed, so it must not occupy one of the capped pending slots for its whole lifetime.
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+        h.Reader.Enqueue(Line(".", type: "NS"));
+        h.Poller.Fire();
+
+        Assert.Equal(QueryMonitorViewModel.UnknownAppLabel, Assert.Single(h.Vm.Rows).App);
+        Assert.Equal(0, h.Vm.PendingAttributionCount);
+    }
+
+    [Fact]
+    public async Task an_attribution_landing_after_the_pending_lifetime_leaves_the_row_unknown()
+    {
+        // Pending is bounded in time: once the lifetime has passed the row gives up for good and
+        // keeps the honest unknown — even though the attribution that finally lands is stamped 0.5 s
+        // before the append, well inside the row's 5 s look-back. The lifetime, not the window,
+        // refuses it (inside the lifetime the very same stamp binds — see the anchor test above).
+        var clock = new ManualClock();
+        using var h = new Harness(clock: clock.Now);
+        await EnableAndActivateAsync(h);
+        var appendedAtMs = clock.NowMs;
+        h.Reader.Enqueue(Line("slow.example"));
+        h.Poller.Fire();
+        var row = Assert.Single(h.Vm.Rows);
+
+        clock.Advance(QueryMonitorViewModel.PendingAttributionLifetime + TimeSpan.FromMilliseconds(1));
+        h.Attribution.Enqueue(1, Entry(1, "slow.example", pid: 100, processName: "chrome", unixMs: appendedAtMs - 500));
+        h.Poller.Fire();
+
+        Assert.Equal(QueryMonitorViewModel.UnknownAppLabel, row.App);
+    }
+
+    [Fact]
+    public async Task a_wall_clock_step_back_past_the_lifetime_does_not_pin_pending_rows()
+    {
+        // The lifetime is judged in both directions: once the clock steps BACK by more than the
+        // lifetime, the row's anchor sits in the "future" and no fresh stamp can meet it — the row
+        // must give up now rather than linger until the clock catches up again.
+        var clock = new ManualClock();
+        using var h = new Harness(clock: clock.Now);
+        await EnableAndActivateAsync(h);
+        h.Reader.Enqueue(Line("stepped.example"));
+        h.Poller.Fire();
+        Assert.Equal(1, h.Vm.PendingAttributionCount);
+
+        clock.Advance(-TimeSpan.FromHours(1));
+        h.Poller.Fire();
+
+        Assert.Equal(0, h.Vm.PendingAttributionCount);
+    }
+
+    [Fact]
+    public async Task the_pending_list_is_capped_and_the_oldest_unknown_rows_give_up_first()
+    {
+        // Bounded memory regardless of volume: a burst of unknown rows past the cap keeps only the
+        // NEWEST pending (theirs is the attribution likeliest still in flight); the oldest overflow
+        // gives up and keeps "—" even when its attribution does land.
+        var clock = new ManualClock();
+        using var h = new Harness(clock: clock.Now);
+        await EnableAndActivateAsync(h);
+        var anchorMs = clock.NowMs;
+        const int overflow = 44;
+        var burst = new QueryLogLine[QueryMonitorViewModel.MaxPendingAttributions + overflow];
+        for (var i = 0; i < burst.Length; i++)
+        {
+            burst[i] = Line("n-" + i);
+        }
+
+        h.Reader.Enqueue(burst);
+        h.Poller.Fire();
+        Assert.Equal(QueryMonitorViewModel.MaxPendingAttributions, h.Vm.PendingAttributionCount);
+
+        // n-0..n-43 overflowed (n-43 the newest of them); n-44 is the oldest row that kept its place.
+        clock.Advance(TimeSpan.FromMilliseconds(750));
+        h.Attribution.Enqueue(4,
+            Entry(1, "n-0", pid: 100, processName: "chrome", unixMs: anchorMs - 100),
+            Entry(2, "n-43", pid: 100, processName: "chrome", unixMs: anchorMs - 100),
+            Entry(3, "n-44", pid: 200, processName: "edge", unixMs: anchorMs - 100),
+            Entry(4, "n-" + (burst.Length - 1), pid: 300, processName: "firefox", unixMs: anchorMs - 100));
+        h.Poller.Fire();
+
+        Assert.Equal(QueryMonitorViewModel.UnknownAppLabel, h.Vm.Rows.Single(r => r.Name == "n-0").App);
+        Assert.Equal(QueryMonitorViewModel.UnknownAppLabel, h.Vm.Rows.Single(r => r.Name == "n-43").App);
+        Assert.Equal("edge", h.Vm.Rows.Single(r => r.Name == "n-44").App);
+        Assert.Equal("firefox", h.Vm.Rows[^1].App);
+        Assert.Equal(QueryMonitorViewModel.MaxPendingAttributions - 2, h.Vm.PendingAttributionCount);
+    }
+
+    [Fact]
+    public async Task clear_view_drops_the_pending_list_so_a_later_batch_binds_nothing()
+    {
+        // OPSEC residue: each pending entry pins a row + its name (browsing history), so "Clear view"
+        // must drop them with the buffer and the lookup — and a batch landing afterwards must find
+        // nothing left to bind.
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+        h.Reader.Enqueue(Line("cleared.example"));
+        h.Poller.Fire();
+        var row = Assert.Single(h.Vm.Rows);
+        Assert.Equal(1, h.Vm.PendingAttributionCount);
+
+        h.Vm.ClearView();
+        Assert.Equal(0, h.Vm.PendingAttributionCount);
+
+        h.Attribution.Enqueue(1, Entry(1, "cleared.example", pid: 100, processName: "chrome"));
+        h.Poller.Fire();
+        Assert.Equal(QueryMonitorViewModel.UnknownAppLabel, row.App); // the cleared row was let go
+    }
+
+    [Fact]
+    public async Task stop_and_clear_drops_the_pending_list()
+    {
+        // "Stop & clear" ends the ticks, so nothing would ever age the pending entries out — the
+        // disable path must drop them explicitly, exactly like the domain→process lookup.
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+        h.Reader.Enqueue(Line("stopped.example"));
+        h.Poller.Fire();
+        Assert.Equal(1, h.Vm.PendingAttributionCount);
+
+        h.Config.LoadQueue.Enqueue(ConfigLoadResult.Ok("[query_log]\nfile = 'x'\n", Sha));
+        await h.Vm.DisableAsync(CancellationToken.None);
+
+        Assert.Equal(0, h.Vm.PendingAttributionCount);
+    }
+
+    [Fact]
+    public async Task a_row_evicted_from_the_ring_leaves_the_pending_list_with_it()
+    {
+        // The 500-row ring stays THE bound on rows held in memory: a pending row the buffer evicts
+        // must not be pinned by the pending list, nor late-bound behind the ring's back.
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+        h.Reader.Enqueue(Line("lonely.example"));
+        h.Poller.Fire();
+        var lonely = Assert.Single(h.Vm.Rows);
+
+        // A full ring of rows that resolve AT APPEND (their attribution is merged first), so none of
+        // them is pending — they only push "lonely" out of the buffer.
+        var flood = new QueryLogLine[500];
+        for (var i = 0; i < flood.Length; i++)
+        {
+            flood[i] = Line("busy.example");
+        }
+
+        h.Attribution.Enqueue(1, Entry(1, "busy.example", pid: 100, processName: "chrome"));
+        h.Reader.Enqueue(flood);
+        h.Poller.Fire();
+        Assert.DoesNotContain(lonely, h.Vm.Rows);
+        Assert.Equal(0, h.Vm.PendingAttributionCount);
+
+        h.Attribution.Enqueue(2, Entry(2, "lonely.example", pid: 200, processName: "edge"));
+        h.Poller.Fire();
+        Assert.Equal(QueryMonitorViewModel.UnknownAppLabel, lonely.App);
+    }
+
+    // ------------------------------------------------------------------ in-flight fetch vs Stop & clear
+
+    [Fact]
+    public async Task an_attribution_fetch_completing_after_stop_and_clear_is_dropped_not_merged()
+    {
+        // OPSEC: a fetch issued before "Stop & clear" can complete after it. Its batch belongs to the
+        // session that was cleared, so it is dropped whole — merging it would refill the
+        // domain→process lookup the clear just emptied and un-reset the rewound cursor.
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+        h.Attribution.Enqueue(3, Entry(3, "before.example", pid: 100, processName: "chrome"));
+        h.Poller.Fire(); // an ordinary fetch: the cursor moves to 3
+        var gate = new TaskCompletionSource<DnsAttributionBatch?>();
+        h.Attribution.Gate = gate;
+        h.Poller.Fire(); // this fetch is still awaiting the pipe...
+
+        h.Config.LoadQueue.Enqueue(ConfigLoadResult.Ok("[query_log]\nfile = 'x'\n", Sha));
+        await h.Vm.DisableAsync(CancellationToken.None); // ...when the user stops & clears
+        Assert.Equal(0, h.Vm.AttributionLookupCount);
+
+        gate.SetResult(new DnsAttributionBatch(9, new[] { Entry(9, "stale.example", pid: 200, processName: "msedge") }));
+
+        Assert.Equal(0, h.Vm.AttributionLookupCount); // dropped, not merged
+        h.Config.LoadQueue.Enqueue(ConfigLoadResult.Ok(string.Empty, Sha));
+        h.Vm.RequestEnable();
+        await h.Vm.ConfirmEnableAsync(CancellationToken.None);
+        h.Poller.Fire();
+        Assert.Equal(0, h.Attribution.FetchCalls[^1]); // the rewound cursor stayed rewound (not 9, not 3)
+    }
+
+    [Fact]
+    public async Task a_pre_clear_fetch_landing_after_a_quick_re_enable_is_still_dropped()
+    {
+        // Logging being back ON is not enough to trust a late batch: when the user re-enables before
+        // the pre-clear fetch completes, that batch still belongs to the cleared session — it must not
+        // seed the new session's lookup or drag its fresh cursor forward.
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+        var gate = new TaskCompletionSource<DnsAttributionBatch?>();
+        h.Attribution.Gate = gate;
+        h.Poller.Fire(); // in flight across the whole stop → re-enable below
+
+        h.Config.LoadQueue.Enqueue(ConfigLoadResult.Ok("[query_log]\nfile = 'x'\n", Sha));
+        await h.Vm.DisableAsync(CancellationToken.None);
+        h.Config.LoadQueue.Enqueue(ConfigLoadResult.Ok(string.Empty, Sha));
+        h.Vm.RequestEnable();
+        await h.Vm.ConfirmEnableAsync(CancellationToken.None);
+        Assert.True(h.Vm.LoggingEnabled);
+
+        gate.SetResult(new DnsAttributionBatch(9, new[] { Entry(9, "stale.example", pid: 200, processName: "msedge") }));
+
+        Assert.Equal(0, h.Vm.AttributionLookupCount);
+        h.Poller.Fire();
+        Assert.Equal(0, h.Attribution.FetchCalls[^1]);
+    }
+
+    [Fact]
+    public async Task a_fetch_landing_after_logging_was_found_off_is_never_merged()
+    {
+        // The other half of the re-check: logging can also go off WITHOUT a clear (the tab re-reads a
+        // config whose query_log.file is gone, so the epoch never moves). A batch landing then is not
+        // merged either — attribution data is only ever kept while logging is on.
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+        var gate = new TaskCompletionSource<DnsAttributionBatch?>();
+        h.Attribution.Gate = gate;
+        h.Poller.Fire();
+
+        h.Config.NextLoad = ConfigLoadResult.Ok("listen_addresses = ['127.0.0.1:53']\n", Sha);
+        await h.Vm.LoadAsync(CancellationToken.None);
+        Assert.False(h.Vm.LoggingEnabled);
+
+        gate.SetResult(new DnsAttributionBatch(9, new[] { Entry(9, "late.example", pid: 200, processName: "msedge") }));
+
+        Assert.Equal(0, h.Vm.AttributionLookupCount);
+    }
+
+    [Fact]
+    public async Task a_tick_landing_after_stop_and_clear_still_shreds_but_leaves_no_rows_behind()
+    {
+        // The shredder is never gated — the late tick still drains (truncates) the on-disk log — but a
+        // buffer that only exists while logging is on must not be refilled by it: rows appended after
+        // "Stop & clear" would sit in memory, and on the pending list with no tick left to age them
+        // out, until some later clear.
+        using var h = new Harness();
+        await EnableAndActivateAsync(h);
+        var gate = new TaskCompletionSource<DnsAttributionBatch?>();
+        h.Attribution.Gate = gate;
+        h.Poller.Fire();
+
+        h.Config.LoadQueue.Enqueue(ConfigLoadResult.Ok("[query_log]\nfile = 'x'\n", Sha));
+        await h.Vm.DisableAsync(CancellationToken.None);
+        var drainsBefore = h.Reader.DrainCalls;
+        h.Reader.Enqueue(Line("after-stop.example"));
+
+        gate.SetResult(null);
+
+        Assert.Equal(drainsBefore + 1, h.Reader.DrainCalls); // still shredded
+        Assert.Equal(0, h.Vm.Stats.Queries);
+        Assert.Empty(h.Vm.RecentRows(5));
+        Assert.Equal(0, h.Vm.PendingAttributionCount);
+    }
+
     // ------------------------------------------------------------------ helpers
 
     /// <summary>Enables logging (consent + confirm) and activates the tab, leaving the poller running.</summary>
@@ -695,4 +1602,11 @@ public class QueryMonitorViewModelTests
         h.Vm.RequestEnable();
         await h.Vm.ConfirmEnableAsync(CancellationToken.None);
     }
+
+    private static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+    /// <summary>A wire attribution entry stamped NOW unless a test needs it stale.</summary>
+    private static DnsAttributionEntry Entry(
+        long seq, string name, int pid, string? processName, long? unixMs = null) =>
+        new(seq, unixMs ?? NowMs(), pid, name, processName);
 }

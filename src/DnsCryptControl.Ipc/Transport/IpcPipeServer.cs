@@ -24,6 +24,13 @@ public sealed class IpcPipeServer : IAsyncDisposable
     /// </summary>
     private static readonly TimeSpan ConnectionTimeout = TimeSpan.FromSeconds(10);
 
+    /// <summary>The byte cap for the deny path's read-and-discard (a pre-TRUST read from an
+    /// unauthenticated caller): 1 MiB — the pre-v5 transport cap — instead of the full
+    /// <see cref="IpcSerializer.MaxBytes"/> (16 MiB), because the frame is thrown away and the
+    /// read only exists to let the denied client finish flushing before the deny frame is sent.
+    /// Keeps the worst per-denied-connection allocation an untrusted peer can force at 1 MiB.</summary>
+    private const int DeniedFrameMaxBytes = 1_048_576;
+
     /// <summary>How often the idle accept loop re-arms to re-resolve the interactive user and
     /// rebuild the pipe DACL — so a login or session change after the helper started (e.g. an
     /// auto-start at boot before anyone logged in) is picked up WITHOUT a manual service restart.
@@ -211,8 +218,12 @@ public sealed class IpcPipeServer : IAsyncDisposable
             // WriteAsync/FlushAsync to complete before we send the deny frame, preventing
             // a race where Disconnect() is called while the client is still flushing its
             // request (which would cause the client to see a broken-pipe error instead of
-            // the deny response). ReadFrameAsync is already hardened (1 MiB cap, fail-closed).
-            _ = await IpcFraming.ReadFrameAsync(stream, ct).ConfigureAwait(false);
+            // the deny response). The caller is UNTRUSTED at this point, so the read runs
+            // under a tighter 1 MiB pre-trust cap, not the full 16 MiB trusted frame limit:
+            // the frame is discarded either way, 1 MiB is ample for the flush race this read
+            // exists to settle, and an unauthenticated peer must not be able to make the
+            // privileged helper buffer 16 MiB per denied connection. Fail-closed as ever.
+            _ = await IpcFraming.ReadFrameAsync(stream, DeniedFrameMaxBytes, ct).ConfigureAwait(false);
 
             var denied = IpcSerializer.SerializePayload(
                 Result.Fail(IpcErrorCode.NotAuthorized, "Caller is not a trusted, signed peer."));

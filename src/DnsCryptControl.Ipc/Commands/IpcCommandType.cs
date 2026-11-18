@@ -43,4 +43,15 @@ public enum IpcCommandType
     /// <c>Result&lt;ResolveVerification&gt;</c> response (a dead route is Success=true with
     /// Resolved=false — Fail means the probe itself could not run).</summary>
     VerifyResolution,
+
+    /// <summary>Reads the helper's bounded IN-MEMORY per-app DNS attribution ring (v1.3.0,
+    /// protocol v5): OS ETW "query called" events from Microsoft-Windows-DNS-Client, each carrying
+    /// the ORIGINATING process's PID — the datum the proxy's query log structurally lacks (every
+    /// query arrives via the Windows DNS Client service as 127.0.0.1). Read-only and best-effort:
+    /// the Query Monitor polls it to fill its App column and shows "—" when nothing matches.
+    /// Polling is itself the demand signal — the helper's ETW capture runs only while these polls
+    /// arrive and stops when they cease, so machine-wide DNS observation never outlives the UI's
+    /// consented query-logging session. Optional <c>DnsAttributionsPayload</c> cursor (absent ⇒
+    /// from the start); <c>Result&lt;DnsAttributionBatch&gt;</c> response.</summary>
+    GetDnsAttributions,
 }

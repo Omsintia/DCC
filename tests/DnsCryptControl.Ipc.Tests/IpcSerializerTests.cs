@@ -50,7 +50,8 @@ public class IpcSerializerTests
     [Fact]
     public void DeserializeRequest_oversizedInput_isRejected()
     {
-        var huge = "{\"Command\":0,\"PayloadJson\":\"" + new string('a', 2_000_000) + "\"}";
+        // Sized off the cap so it tracks cap changes (a 2 MB literal silently stopped being oversize in v5).
+        var huge = "{\"Command\":0,\"PayloadJson\":\"" + new string('a', IpcSerializer.MaxBytes + 64) + "\"}";
         Assert.Null(IpcSerializer.DeserializeRequest(huge));
     }
 
@@ -72,7 +73,7 @@ public class IpcSerializerTests
     [Fact]
     public void DeserializePayload_oversizedInput_isRejected()
     {
-        Assert.Null(IpcSerializer.DeserializePayload<WriteConfigPayload>(new string('a', 2_000_000)));
+        Assert.Null(IpcSerializer.DeserializePayload<WriteConfigPayload>(new string('a', IpcSerializer.MaxBytes + 64)));
     }
 
     [Fact]

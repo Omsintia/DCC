@@ -103,9 +103,14 @@ public partial class AnonymizedDnsView
         ViewModel?.ApplyStrictFix();
     }
 
-    /// <summary>Adds a route from the builder combos. The server may be a candidate name or a typed
-    /// value (incl. <c>*</c>); the via is the selected/typed relay (or <c>*</c>). The VM's IC-7 gate
-    /// validates both and surfaces AddRouteError on a bad value — the view never validates.</summary>
+    /// <summary>Adds a route from the builder. The server may be a candidate name or a typed value
+    /// (incl. <c>*</c>). The via is the staged multi-relay chips PLUS any non-blank value still in the
+    /// via combo (staged first via <see cref="AnonymizedDnsViewModel.AddViaRelay"/>, whose dedupe and
+    /// <c>*</c>-exclusivity rules apply) — the Edit-a-route flow seeds the chips and the user's newest
+    /// pick sits in the combo, so silently discarding it would re-add the unchanged route with zero
+    /// feedback. With no chips, the combo's single selected/typed relay is the zero-extra-clicks quick
+    /// path. The VM's IC-7 gate validates everything and surfaces AddRouteError — the view never
+    /// validates (a combo value the VM refuses to stage is passed through so that gate names it).</summary>
     private void AddRoute_Click(object sender, RoutedEventArgs e)
     {
         if (ViewModel is not { } vm)
@@ -114,13 +119,76 @@ public partial class AnonymizedDnsView
         }
 
         var server = ReadComboValue(AddServerCombo);
+        if (string.IsNullOrWhiteSpace(server))
+        {
+            return;
+        }
+
+        if (vm.AddViaSelection.Count > 0)
+        {
+            // A non-blank combo value beside staged chips is the user's newest pick — stage it too.
+            var typedVia = ReadComboValue(AddViaCombo);
+            if (!string.IsNullOrWhiteSpace(typedVia) && !vm.AddViaRelay(typedVia))
+            {
+                // The VM refused to stage it (invalid value): hand chips + typed to AddRoute so its
+                // IC-7 gate names the offending value in AddRouteError instead of dropping it silently.
+                vm.AddRoute(server, vm.AddViaSelection.Append(typedVia!).ToList());
+                return;
+            }
+
+            // Staged (or blank) — the chips now carry everything; clear the consumed combo value.
+            AddViaCombo.SelectedItem = null;
+            AddViaCombo.Text = string.Empty;
+
+            // Snapshot the chips: a successful AddRoute clears AddViaSelection, and passing the live
+            // collection would hand the VM a list it is about to empty.
+            vm.AddRoute(server, vm.AddViaSelection.ToList());
+            return;
+        }
+
         var via = ReadComboValue(AddViaCombo);
-        if (string.IsNullOrWhiteSpace(server) || string.IsNullOrWhiteSpace(via))
+        if (string.IsNullOrWhiteSpace(via))
         {
             return;
         }
 
         vm.AddRoute(server, new[] { via });
+    }
+
+    /// <summary>The builder's "+ Add relay": stages the via combo's current relay as a chip in the
+    /// multi-relay list, then resets the combo for the next pick. All the rules (trim, validity gate,
+    /// case-insensitive dedupe, <c>*</c>-exclusivity) live in the unit-tested
+    /// <see cref="AnonymizedDnsViewModel.AddViaRelay"/> — this handler only reads the combo, and only
+    /// clears it when the VM reports the relay staged (a refused value keeps the user's text in place
+    /// to fix, instead of silently wiping it). SelectedItem is nulled BEFORE the text so a stale
+    /// selection can't shadow the cleared text on the next read.</summary>
+    private void AddRelay_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is not { } vm)
+        {
+            return;
+        }
+
+        var via = ReadComboValue(AddViaCombo);
+        if (string.IsNullOrWhiteSpace(via))
+        {
+            return;
+        }
+
+        if (vm.AddViaRelay(via))
+        {
+            AddViaCombo.SelectedItem = null;
+            AddViaCombo.Text = string.Empty;
+        }
+    }
+
+    /// <summary>A staged relay chip's ✕ button (carries the relay as <c>Tag</c>): unstages that relay.</summary>
+    private void RemoveRelay_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is { } vm && sender is FrameworkElement { Tag: string relay })
+        {
+            vm.RemoveViaRelay(relay);
+        }
     }
 
     /// <summary>Removes the route row whose button carries it as <c>Tag</c>, by its current index.</summary>
@@ -139,9 +207,14 @@ public partial class AnonymizedDnsView
     }
 
     /// <summary>Loads the route (its button carries it as <c>Tag</c>) back into the builder so the user can
-    /// change its relay and click "Add route", which now replaces the row for that server. Repoints the via
-    /// candidates via <see cref="AnonymizedDnsViewModel.SetBuilderServer"/>, then seeds the current relay (a
-    /// single editable combo maps to one relay, so a multi-via route just seeds its first entry).</summary>
+    /// change its relays and click "Add route", which replaces the row for that server. Repoints the via
+    /// candidates via <see cref="AnonymizedDnsViewModel.SetBuilderServer"/>, then seeds the FULL via list
+    /// into the chip-adder via <see cref="AnonymizedDnsViewModel.SeedViaSelection"/> — the old single-combo
+    /// seed kept only <c>via[0]</c>, so editing a multi-relay route silently DROPPED relays 2..N on re-add.
+    /// The via combo is cleared (chips now carry the route's relays) and focused for the next pick — except
+    /// a route whose via list is EMPTY (a hand-edited <c>via=[]</c> the codec accepts): zero chips plus an
+    /// empty combo would make "Add route" a silent no-op, so that branch defaults the combo to <c>*</c>
+    /// (any compatible relay), as the pre-chip-list builder did.</summary>
     private void EditRoute_Click(object sender, RoutedEventArgs e)
     {
         if (ViewModel is not { } vm || sender is not FrameworkElement { Tag: RouteRowViewModel row })
@@ -151,7 +224,9 @@ public partial class AnonymizedDnsView
 
         AddServerCombo.Text = row.ServerName;
         vm.SetBuilderServer(row.ServerName);
-        AddViaCombo.Text = row.Via.Count > 0 ? row.Via[0] : "*";
+        vm.SeedViaSelection(row.Via);
+        AddViaCombo.SelectedItem = null;
+        AddViaCombo.Text = row.Via.Count > 0 ? string.Empty : DefaultVia;
         AddViaCombo.Focus();
     }
 
@@ -161,9 +236,14 @@ public partial class AnonymizedDnsView
     /// relay. The VM computes the proto-matched set and surfaces an empty-state hint when only <c>*</c> remains.</summary>
     private void AddServerCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        // SetBuilderServer also clears the staged relay CHIPS on a genuine server change (a chip picked
+        // for the old server's proto could pair a mismatched relay, which silently kills the server).
         ViewModel?.SetBuilderServer(ReadComboValue(AddServerCombo));
         // Re-default the relay to '*' whenever the server changes (a picked server's proto-matched via
         // list was just repointed) — so the safe auto-relay is the standing default, not a stale pick.
+        // SelectedItem is nulled first: a prior selection surviving the ItemsSource repoint would shadow
+        // the '*' text on the next ReadComboValue.
+        AddViaCombo.SelectedItem = null;
         AddViaCombo.Text = DefaultVia;
     }
 

@@ -58,6 +58,16 @@ public sealed class HelperClient : IHelperClient
     public Task<Result<ResolveVerification>?> VerifyResolutionAsync(CancellationToken ct) =>
         CallAsync<ResolveVerification>(IpcCommandType.VerifyResolution, ct);
 
+    public async Task<DnsAttributionBatch?> GetDnsAttributionsAsync(long afterSeq, CancellationToken ct)
+    {
+        // Same payload-carrying generic-response plumbing as VerifyResolution's family, but the
+        // Result envelope is unwrapped here: attribution is best-effort display data, so failure
+        // and unsuccess both collapse to null (the interface's "unknown" contract).
+        var result = await CallAsync<DnsAttributionsPayload, DnsAttributionBatch>(
+            IpcCommandType.GetDnsAttributions, new DnsAttributionsPayload(afterSeq), ct).ConfigureAwait(false);
+        return result is { Success: true } ? result.Value : null;
+    }
+
     public Task<Result<ServiceLifecycleResponse>?> RestartProxyAsync(CancellationToken ct) =>
         CallAsync<ServiceLifecycleResponse>(IpcCommandType.RestartProxy, ct);
 

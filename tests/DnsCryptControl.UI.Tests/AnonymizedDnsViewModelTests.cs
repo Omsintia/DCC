@@ -51,6 +51,21 @@ public class AnonymizedDnsViewModelTests
             Assert.True(_pending.TryDequeue(out var action), "no queued post to run");
             action!();
         }
+
+        /// <summary>Plays the UI thread through a whole async flow: runs each queued post IN ARRIVAL
+        /// ORDER on the calling (test) thread until <paramref name="settled"/> holds, waiting for the
+        /// next post whenever it does not. A post never runs inside <see cref="Post"/> itself — the
+        /// semantics of production's <c>Dispatcher.BeginInvoke</c> — so a pool-thread continuation that
+        /// reads state a queued post has not applied yet misbehaves here exactly as it does in the app
+        /// (the inline <see cref="SynchronousDispatcher"/> hides that whole class of bug).</summary>
+        public async Task RunPostsUntilAsync(Func<bool> settled)
+        {
+            while (!settled())
+            {
+                await WaitForQueuedPostAsync();
+                RunNext();
+            }
+        }
     }
 
     private sealed class FakeConfigFileService : IConfigFileService
@@ -134,24 +149,42 @@ public class AnonymizedDnsViewModelTests
         Snapshot("relays", new[] { Entry("anon-relay", DnsCryptRelayStamp()) }),
     };
 
+    /// <summary>Two DNSCrypt servers + TWO DNSCrypt relays — the multi-relay chip-adder needs at least
+    /// two distinct relay candidates to prove ordering, dedupe, and the no-drop edit round-trip.</summary>
+    private static ResolverListSnapshot[] TwoRelayLists() => new[]
+    {
+        Snapshot("public-resolvers", new[]
+        {
+            Entry("cloudflare", DnsCryptStamp()),
+            Entry("quad9", DnsCryptStamp()),
+        }),
+        Snapshot("relays", new[]
+        {
+            Entry("relay-a", DnsCryptRelayStamp()),
+            Entry("relay-b", DnsCryptRelayStamp("6.7.8.9")),
+        }),
+    };
+
     private sealed record Harness(
         AnonymizedDnsViewModel Vm,
         FakeConfigFileService File,
         FakeListReader Lists,
         FakeUiStateStore Store,
-        SynchronousDispatcher Dispatcher,
+        IUiDispatcher Dispatcher,
         FakeHelperClient Helper);
 
-    private static Harness Build(string configText, IEnumerable<ResolverListSnapshot>? snapshots = null, UiState? uiState = null)
+    private static Harness Build(
+        string configText, IEnumerable<ResolverListSnapshot>? snapshots = null, UiState? uiState = null,
+        IUiDispatcher? dispatcher = null)
     {
         var file = new FakeConfigFileService { NextLoad = ConfigLoadResult.Ok(configText, Sha) };
         var lists = new FakeListReader();
         if (snapshots is not null) lists.Snapshots.AddRange(snapshots);
         var store = new FakeUiStateStore { State = uiState ?? new UiState() };
-        var dispatcher = new SynchronousDispatcher();
+        var ui = dispatcher ?? new SynchronousDispatcher();
         var helper = new FakeHelperClient(); // unscripted VerifyResolution default = resolved route (no warning)
-        var vm = new AnonymizedDnsViewModel(file, lists, store, dispatcher, helper);
-        return new Harness(vm, file, lists, store, dispatcher, helper);
+        var vm = new AnonymizedDnsViewModel(file, lists, store, ui, helper);
+        return new Harness(vm, file, lists, store, ui, helper);
     }
 
     private static async Task<Harness> LoadedAsync(
@@ -395,6 +428,152 @@ public class AnonymizedDnsViewModelTests
         Assert.Equal(new[] { "*" }, h.Vm.AddViaCandidates);
         Assert.NotNull(h.Vm.AddViaEmptyHint);
         Assert.Contains("DNSCrypt relays", h.Vm.AddViaEmptyHint!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ---- multi-relay chip-adder (AddViaSelection: dnscrypt-proxy picks ONE staged relay at random
+    //      per cert-refresh cycle, so an N-relay via is diversity/failover the single combo couldn't build) ----
+
+    [Fact]
+    public async Task add_via_relay_trims_and_dedupes_case_insensitively()
+    {
+        var h = await LoadedAsync(""); // StandardLists: 'anon-relay' is a via candidate at load
+
+        Assert.True(h.Vm.AddViaRelay("  anon-relay  "));
+        Assert.True(h.Vm.AddViaRelay("ANON-RELAY"));   // same relay, different case → already staged (true, not re-added)
+
+        // One chip, canonicalized to the candidate's exact casing (the proxy matches names exactly).
+        Assert.Equal(new[] { "anon-relay" }, h.Vm.AddViaSelection);
+    }
+
+    [Fact]
+    public async Task add_via_relay_wildcard_is_exclusive_in_both_directions()
+    {
+        var h = await LoadedAsync("", TwoRelayLists());
+
+        h.Vm.AddViaRelay("relay-a");
+        h.Vm.AddViaRelay("relay-b");
+        h.Vm.AddViaRelay("*");            // '*' already covers every relay — staging it clears the named ones…
+        Assert.Equal(new[] { "*" }, h.Vm.AddViaSelection);
+
+        h.Vm.AddViaRelay("relay-a");      // …and staging a named relay drops '*' again
+        Assert.Equal(new[] { "relay-a" }, h.Vm.AddViaSelection);
+    }
+
+    [Fact]
+    public async Task add_via_relay_accepts_exactly_what_the_quick_path_accepts_and_reports_refusals()
+    {
+        // FIX M: the chip-adder and the single-relay quick path accept IDENTICAL inputs (IsValidVia)
+        // — the quick path takes a bare relay name that is not in the cached candidate lists, so
+        // "+ Add relay" must stage it too rather than silently refuse it. The bool return drives the
+        // view: it clears the combo only on true, keeping a refused value's text for the user to fix.
+        var h = await LoadedAsync("");
+
+        Assert.False(h.Vm.AddViaRelay(null));
+        Assert.False(h.Vm.AddViaRelay("   "));
+        Assert.False(h.Vm.AddViaRelay("evil name!; drop")); // an invalid shape both paths refuse
+        Assert.Empty(h.Vm.AddViaSelection);
+
+        Assert.True(h.Vm.AddViaRelay("not-a-listed-relay")); // a valid bare NAME — stageable like the quick path
+        Assert.Equal(new[] { "not-a-listed-relay" }, h.Vm.AddViaSelection);
+    }
+
+    [Fact]
+    public async Task remove_via_relay_removes_only_that_chip()
+    {
+        var h = await LoadedAsync("", TwoRelayLists());
+
+        h.Vm.AddViaRelay("relay-a");
+        h.Vm.AddViaRelay("relay-b");
+        h.Vm.RemoveViaRelay("relay-a");
+
+        Assert.Equal(new[] { "relay-b" }, h.Vm.AddViaSelection);
+    }
+
+    [Fact]
+    public async Task add_route_with_two_staged_relays_produces_a_row_with_both_in_order()
+    {
+        var h = await LoadedAsync("", TwoRelayLists());
+
+        h.Vm.AddViaRelay("relay-a");
+        h.Vm.AddViaRelay("relay-b");
+        h.Vm.AddRoute("cloudflare", h.Vm.AddViaSelection.ToList());
+
+        var row = Assert.Single(h.Vm.Routes);
+        Assert.Equal(new[] { "relay-a", "relay-b" }, row.Via);
+        Assert.Empty(h.Vm.AddViaSelection); // a successful add consumes the staged chips
+    }
+
+    [Fact]
+    public async Task a_refused_add_route_keeps_the_staged_relay_chips()
+    {
+        var h = await LoadedAsync("", TwoRelayLists());
+
+        h.Vm.AddViaRelay("relay-a");
+        h.Vm.AddRoute("evil name!; drop", h.Vm.AddViaSelection.ToList());
+
+        Assert.NotNull(h.Vm.AddRouteError);
+        Assert.Equal(new[] { "relay-a" }, h.Vm.AddViaSelection); // still staged — fix the value and retry
+    }
+
+    [Fact]
+    public async Task edit_seed_round_trip_of_a_multi_via_route_drops_no_relay()
+    {
+        // The old single-combo Edit seeded only via[0], silently dropping relays 2..N on re-add. The Edit
+        // flow now seeds the FULL via into the chip list; re-adding from it must preserve every relay.
+        var config = "[anonymized_dns]\nroutes = [ { server_name = 'cloudflare', via = ['relay-a', 'relay-b'] } ]\n";
+        var h = await LoadedAsync(config, TwoRelayLists());
+        var row = Assert.Single(h.Vm.Routes);
+        Assert.Equal(new[] { "relay-a", "relay-b" }, row.Via);
+
+        h.Vm.SetBuilderServer(row.ServerName);   // what EditRoute_Click does first (repoints candidates)
+        h.Vm.SeedViaSelection(row.Via);          // then seeds the full via list
+        Assert.Equal(new[] { "relay-a", "relay-b" }, h.Vm.AddViaSelection);
+
+        h.Vm.AddRoute(row.ServerName, h.Vm.AddViaSelection.ToList()); // "Add route" replaces the row
+        var edited = Assert.Single(h.Vm.Routes);
+        Assert.Equal(new[] { "relay-a", "relay-b" }, edited.Via);
+    }
+
+    [Fact]
+    public async Task seed_via_selection_keeps_relays_that_are_not_candidates()
+    {
+        // On-disk via entries may not be in any cached list (hand-added names or stamps). Seeding copies
+        // VERBATIM — gating on candidates here would silently drop relays on edit, the exact bug fixed.
+        var h = await LoadedAsync("");
+
+        h.Vm.SeedViaSelection(new[] { "hand-added-relay", "anon-relay" });
+
+        Assert.Equal(new[] { "hand-added-relay", "anon-relay" }, h.Vm.AddViaSelection);
+    }
+
+    [Fact]
+    public async Task changing_the_builder_server_clears_the_staged_chips_but_reasserting_it_keeps_them()
+    {
+        var h = await LoadedAsync("", TwoRelayLists());
+
+        h.Vm.SetBuilderServer("cloudflare");
+        h.Vm.AddViaRelay("relay-a");
+        h.Vm.SetBuilderServer("cloudflare");   // same server re-asserted (the Edit flow) — chips survive
+        Assert.Equal(new[] { "relay-a" }, h.Vm.AddViaSelection);
+
+        h.Vm.SetBuilderServer("quad9");        // a genuine change — an old-proto chip could pair a mismatch
+        Assert.Empty(h.Vm.AddViaSelection);
+    }
+
+    [Fact]
+    public async Task reload_clears_the_staged_relay_chips()
+    {
+        // Chips are pre-add BUILDER state, not config state (staging one does not dirty the tab),
+        // so a reload/revert resets them alongside the rest of the builder.
+        var h = await LoadedAsync("", TwoRelayLists());
+        h.Vm.AddViaRelay("relay-a");
+        Assert.Single(h.Vm.AddViaSelection);
+        Assert.False(h.Vm.IsDirty);
+
+        h.File.NextLoad = ConfigLoadResult.Ok("", Sha2);
+        await h.Vm.LoadAsync(CancellationToken.None);
+
+        Assert.Empty(h.Vm.AddViaSelection);
     }
 
     // ---- Resolvers "Route through a relay" shortcut (PendingRouteServer) ----
@@ -1197,5 +1376,135 @@ public class AnonymizedDnsViewModelTests
         var stashed = h.Store.Saves[0].StashedRoutes;
         Assert.Single(stashed);
         Assert.Equal("cloudflare", stashed[0].ServerName);
+    }
+
+    // ================================================================== save outcome under a QUEUED dispatcher
+    //
+    // Production's IUiDispatcher is Dispatcher.BeginInvoke — a post is QUEUED, never run inline — while
+    // every save test above runs on the inline SynchronousDispatcher. The outcome handler runs on a pool
+    // thread (the save awaits with ConfigureAwait(false)); it used to queue the dispatched-op removal and
+    // then read the staged count straight away, before that removal had run. Under BeginInvoke the count
+    // was therefore never 0: a perfectly normal save said "an edit made during the save is still unsaved"
+    // and SKIPPED the post-save reload (stale routes baseline → a false "changed on disk" conflict on the
+    // next save). These tests queue every post and pump them in order on the test thread — the UI thread.
+
+    /// <summary>A loaded harness whose dispatcher QUEUES every post; the load's one publication is pumped here.</summary>
+    private static async Task<Harness> LoadedOnQueuedDispatcherAsync(QueueingDispatcher ui, string configText)
+    {
+        var h = Build(configText, StandardLists(), dispatcher: ui);
+        var load = h.Vm.LoadAsync(CancellationToken.None);
+        await ui.WaitForQueuedPostAsync();
+        ui.RunNext(); // the load's single publication post
+        await load;
+        return h;
+    }
+
+    /// <summary>Runs one Save &amp; apply to completion with the test thread as the UI thread: every post is
+    /// pumped in arrival order until the save's final busy-clear post has run (it is always the LAST post).</summary>
+    private static async Task SaveOnQueuedDispatcherAsync(Harness h, QueueingDispatcher ui)
+    {
+        var save = h.Vm.SaveAndApplyCommand.ExecuteAsync(null);
+        await ui.RunPostsUntilAsync(() => !h.Vm.IsBusy);
+        await save;
+    }
+
+    [Fact]
+    public async Task applied_save_on_a_queued_dispatcher_reloads_and_reports_a_clean_save()
+    {
+        using var ui = new QueueingDispatcher();
+        var h = await LoadedOnQueuedDispatcherAsync(ui, StrictEnabledConfig);
+        h.Vm.AddRoute("quad9", new[] { "anon-relay" });
+        h.File.NextLoad = ConfigLoadResult.Ok(StrictEnabledConfig, Sha2);
+        var appliedSha = new string('c', 64);
+        ScriptApplied(h.File, appliedSha);
+        var loadsBefore = h.File.LoadCalls;
+
+        await SaveOnQueuedDispatcherAsync(h, ui);
+
+        Assert.Equal("Configuration saved and applied.", h.Vm.SaveNotice); // never the false "still unsaved"
+        Assert.Equal(loadsBefore + 2, h.File.LoadCalls); // the IC-9 fresh read + the post-save reload
+        Assert.Equal(appliedSha, h.Vm.BaseSha256);        // re-baselined on the bytes the helper just wrote
+        Assert.False(h.Vm.IsDirty);
+        Assert.Equal(1, h.Helper.VerifyResolutionCalls);  // FIX #1 still verifies — after the reload
+        Assert.Null(h.Vm.PostApplyWarning);
+    }
+
+    [Theory]
+    [InlineData(ConfigSaveOutcomeKind.RestartFailed)]
+    [InlineData(ConfigSaveOutcomeKind.ProxyRejected)]
+    public async Task write_landed_failure_on_a_queued_dispatcher_still_reloads_then_posts_its_state(ConfigSaveOutcomeKind kind)
+    {
+        using var ui = new QueueingDispatcher();
+        var h = await LoadedOnQueuedDispatcherAsync(ui, StrictEnabledConfig);
+        h.Vm.AddRoute("quad9", new[] { "anon-relay" });
+        h.File.NextLoad = ConfigLoadResult.Ok(StrictEnabledConfig, Sha2);
+        var landedSha = new string('c', 64);
+        h.File.SaveHandler = (text, _, _) =>
+        {
+            h.File.NextLoad = ConfigLoadResult.Ok(text, landedSha);
+            return Task.FromResult(new ConfigSaveOutcome(kind, "written, but the proxy is unhealthy"));
+        };
+
+        await SaveOnQueuedDispatcherAsync(h, ui);
+
+        Assert.Equal(landedSha, h.Vm.BaseSha256); // the write LANDED — the baseline must follow it
+        Assert.False(h.Vm.IsDirty);
+        // The persistent state posts strictly AFTER the reload (whose publication clears RestartFailedMessage).
+        var persistent = kind == ConfigSaveOutcomeKind.RestartFailed ? h.Vm.RestartFailedMessage : h.Vm.ProxyRejectedMessage;
+        Assert.Equal("written, but the proxy is unhealthy", persistent);
+        Assert.Equal(0, h.Helper.VerifyResolutionCalls); // only Applied verifies
+    }
+
+    [Fact]
+    public async Task an_edit_staged_while_a_queued_dispatcher_save_is_in_flight_stays_unsaved()
+    {
+        // The mid-flight contract must survive the fix: the remaining count is taken ON the UI thread,
+        // after the removal, so an edit made during the save keeps the tab dirty and skips the reload
+        // that would destroy it.
+        using var ui = new QueueingDispatcher();
+        var h = await LoadedOnQueuedDispatcherAsync(ui, StrictEnabledConfig);
+        h.Vm.AddRoute("quad9", new[] { "anon-relay" }); // the op this save dispatches
+        h.File.NextLoad = ConfigLoadResult.Ok(StrictEnabledConfig, Sha2);
+        var reachedService = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var outcome = new TaskCompletionSource<ConfigSaveOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
+        h.File.SaveHandler = (_, _, _) =>
+        {
+            reachedService.TrySetResult();
+            return outcome.Task;
+        };
+        var loadsBefore = h.File.LoadCalls;
+
+        var save = h.Vm.SaveAndApplyCommand.ExecuteAsync(null);
+        await reachedService.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        h.Vm.ApplyDohFix(); // the user edits — on the UI thread — while the save is in flight
+        outcome.SetResult(new ConfigSaveOutcome(ConfigSaveOutcomeKind.Applied, null));
+        await ui.RunPostsUntilAsync(() => !h.Vm.IsBusy);
+        await save;
+
+        Assert.True(h.Vm.IsDirty); // the mid-flight doh_servers op survived the removal
+        Assert.Equal(
+            "Configuration saved and applied — an edit made during the save is still unsaved.", h.Vm.SaveNotice);
+        Assert.Equal(loadsBefore + 1, h.File.LoadCalls); // only the fresh read — no reload over the newer edit
+    }
+
+    [Fact]
+    public async Task a_second_save_after_a_queued_dispatcher_save_is_not_a_false_conflict()
+    {
+        // The skipped reload's user-visible damage: the routes baseline stayed at the PRE-save routes, so
+        // the next routes edit "diverged" from the very routes this app had just written.
+        using var ui = new QueueingDispatcher();
+        var h = await LoadedOnQueuedDispatcherAsync(ui, StrictEnabledConfig);
+        h.Vm.AddRoute("quad9", new[] { "anon-relay" });
+        h.File.NextLoad = ConfigLoadResult.Ok(StrictEnabledConfig, Sha2);
+        ScriptApplied(h.File, new string('c', 64)); // the next Load returns exactly the bytes written
+        await SaveOnQueuedDispatcherAsync(h, ui);
+
+        h.Vm.RemoveRoute(0); // edit the routes just saved: drop cloudflare, keep quad9
+        ScriptApplied(h.File, new string('d', 64));
+        await SaveOnQueuedDispatcherAsync(h, ui);
+
+        Assert.Null(h.Vm.ConflictMessage);
+        Assert.Equal(2, h.File.SaveCalls.Count);
+        Assert.Equal("Configuration saved and applied.", h.Vm.SaveNotice);
     }
 }

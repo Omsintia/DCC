@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using DnsCryptControl.Core.Rules;
 using DnsCryptControl.Core.Toml;
+using DnsCryptControl.Ipc.Serialization;
 using DnsCryptControl.Platform;
 using DnsCryptControl.UI.Services;
 
@@ -114,14 +116,17 @@ public sealed partial class FilteringViewModel : ObservableObject, IDisposable
     /// is wired (loaded-or-staged, and OURS not external) yet the <c>.txt</c> holds zero rules — i.e.
     /// "enabled, but nothing is blocked yet". Entry ABSENT (not shown) otherwise, so the View binds
     /// visibility to key presence. Content-derived: the toggle being on never fabricates a protection
-    /// claim, and turning it on over an empty file surfaces THIS banner rather than a count.</summary>
+    /// claim, and turning it on over an empty file surfaces THIS banner rather than a count. An
+    /// OVERSIZE-unlisted body (empty rows but real content — <see
+    /// cref="RuleFamilyEditorViewModel.IsOversizeUnlisted"/>) is NOT empty and never banner-flagged.</summary>
     [ObservableProperty]
     private IReadOnlyDictionary<RuleFamily, string> _emptyButWiredBanners =
         new Dictionary<RuleFamily, string>();
 
     /// <summary>The overall headline: "K of 6 families active" — derived from CONTENT (a family is
-    /// "active" only when it is wired to OUR <c>.txt</c> AND that <c>.txt</c> holds ≥1 rule). A wired
-    /// but empty family, an unwired family, and an externally-managed family all count as NOT active.</summary>
+    /// "active" only when it is wired to OUR <c>.txt</c> AND that <c>.txt</c> holds ≥1 rule — or is
+    /// oversize-unlisted: nonempty content we just don't itemise). A wired but truly empty family,
+    /// an unwired family, and an externally-managed family all count as NOT active.</summary>
     [ObservableProperty]
     private string _activeFamiliesHeadline = "0 of 6 filtering families active.";
 
@@ -186,15 +191,18 @@ public sealed partial class FilteringViewModel : ObservableObject, IDisposable
 
         // C3 (IC-16): the derived honesty/summary state follows the family's CONTENT, so it must
         // recompute whenever an editor's parse changes — a user raw edit (debounced re-parse) or a
-        // structured edit both republish Rows/Findings on the UI thread. The editor's IUiDispatcher is
-        // the SAME instance we hold, so these callbacks arrive UI-thread-affine (IC-5) — recompute inline.
+        // structured edit both republish Rows/Findings on the UI thread; an oversize publish flips
+        // IsOversizeUnlisted (its Rows may stay the same empty array, so the flag is a trigger of
+        // its own). The editor's IUiDispatcher is the SAME instance we hold, so these callbacks
+        // arrive UI-thread-affine (IC-5) — recompute inline.
         foreach (var context in _families)
         {
             context.Editor.PropertyChanged += (_, e) =>
             {
                 if (!_suppressDerivedRecompute
                     && e.PropertyName is nameof(RuleFamilyEditorViewModel.Rows)
-                        or nameof(RuleFamilyEditorViewModel.Findings))
+                        or nameof(RuleFamilyEditorViewModel.Findings)
+                        or nameof(RuleFamilyEditorViewModel.IsOversizeUnlisted))
                 {
                     RefreshDerivedState();
                 }
@@ -534,6 +542,95 @@ public sealed partial class FilteringViewModel : ObservableObject, IDisposable
         }
     }
 
+    /// <summary>The largest file <see cref="ImportFamilyFileAsync"/> will read: the transport frame
+    /// cap — anything bigger could never be SAVED, so refusing at pick time (with the limit named)
+    /// beats a doomed multi-MB read (IC-14 spirit).</summary>
+    internal const long ImportMaxBytes = IpcSerializer.MaxBytes;
+
+    /// <summary>
+    /// Imports a rule-list FILE into a family's editor — the paste-free path for big community
+    /// blocklists (the official DNSCrypt domains list is ~9 MB; pasting that through a TextBox is
+    /// misery). READ-ONLY here: the text lands in the editor exactly like a paste (dirty + the
+    /// debounced re-parse; past the list guard it gets the lightweight "too large to list" summary),
+    /// and the user then Saves (and Enables) through the normal validated path — nothing is written
+    /// by the import itself. Fail-closed: every refusal (externally-managed family, missing file,
+    /// over-cap file, binary content, read error) surfaces as the family's error banner.
+    /// </summary>
+    public async Task ImportFamilyFileAsync(RuleFamily family, string path, CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(path);
+        var context = _byFamily[family];
+        if (IsBusy)
+        {
+            return;
+        }
+
+        if (context.IsExternallyManaged)
+        {
+            PostImportError(family,
+                "this family is wired to an external file you manage — edit that file directly instead of importing.");
+            return;
+        }
+
+        IsBusy = true;
+        try
+        {
+            string text;
+            try
+            {
+                var info = new FileInfo(path);
+                if (!info.Exists)
+                {
+                    PostImportError(family, "the selected file no longer exists.");
+                    return;
+                }
+
+                if (info.Length > ImportMaxBytes)
+                {
+                    PostImportError(family,
+                        $"this file is {info.Length / 1_048_576.0:F1} MiB — over the {ImportMaxBytes / 1_048_576} MiB per-request save limit. Split it, or reference it as an external file.");
+                    return;
+                }
+
+                text = await File.ReadAllTextAsync(path, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+            {
+                // The user's own picked path, shown only in their local banner — no scrub needed.
+                PostImportError(family, $"the file could not be read: {ex.Message}");
+                return;
+            }
+
+            if (text.Contains('\0', StringComparison.Ordinal))
+            {
+                PostImportError(family, "this file contains binary data (a NUL byte) — it is not a text rule list.");
+                return;
+            }
+
+            var fileName = Path.GetFileName(path);
+            _ui.Post(() =>
+            {
+                context.Editor.RawText = text; // exactly a paste: dirty + Pending + the debounced re-parse
+                FamilyErrors = WithoutEntry(FamilyErrors, family);
+                FamilyNotices = WithEntry(FamilyNotices, family,
+                    $"imported {text.Length:N0} characters from {fileName} — review, then Save (and Enable & wire if this family isn't enabled yet).");
+            });
+        }
+        finally
+        {
+            _ui.Post(() => IsBusy = false);
+        }
+    }
+
+    /// <summary>Surfaces an import refusal/failure on the family's error banner (clearing any stale
+    /// notice, mirroring <see cref="ApplyTxtOutcome"/>'s error arm).</summary>
+    private void PostImportError(RuleFamily family, string message) =>
+        _ui.Post(() =>
+        {
+            FamilyNotices = WithoutEntry(FamilyNotices, family);
+            FamilyErrors = WithEntry(FamilyErrors, family, message);
+        });
+
     /// <summary>Maps a rule-file write outcome onto the per-family notice/error surfaces (verbatim
     /// helper messages, IC-10). The simplified map: only Applied/Rejected/HelperUnavailable/TooLarge.</summary>
     private void ApplyTxtOutcome(RuleFamily family, RuleFileWriteOutcome outcome)
@@ -661,7 +758,10 @@ public sealed partial class FilteringViewModel : ObservableObject, IDisposable
                 continue;
             }
 
-            if (rules > 0)
+            // An oversize body (5d-VM-4) has EMPTY Rows because the content is UNLISTED, not absent
+            // — the family carries a real (multi-MB) list, so it counts as active and must never
+            // wear the "enabled, but empty" banner (rules==0 would invert the honesty signal here).
+            if (rules > 0 || context.Editor.IsOversizeUnlisted)
             {
                 activeCount++;
             }

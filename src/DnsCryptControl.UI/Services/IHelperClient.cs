@@ -28,6 +28,16 @@ public interface IHelperClient : IAsyncDisposable
     /// silence). Call only on an explicit user apply, never on a poll.</summary>
     Task<Result<ResolveVerification>?> VerifyResolutionAsync(CancellationToken ct);
 
+    /// <summary>v1.3.0 (rides protocol v5): reads the helper's bounded in-memory per-app DNS
+    /// attribution ring — ETW-observed lookups with their ORIGINATING process, the datum the
+    /// proxy's query log lacks. <paramref name="afterSeq"/> is the last batch's <c>LastSeq</c>
+    /// (0 first time) so each entry crosses the pipe once. Polling this IS the demand signal the
+    /// helper's ETW capture lives by, so call it only while query logging is consented-on. Unlike
+    /// the sibling methods this unwraps the <c>Result</c>: attribution is best-effort display
+    /// data with no error surface — transport failure and an unsuccessful result both collapse to
+    /// <c>null</c>, which the caller renders as "unknown" ("—"), never a guess.</summary>
+    Task<DnsAttributionBatch?> GetDnsAttributionsAsync(long afterSeq, CancellationToken ct);
+
     Task<Result<ServiceLifecycleResponse>?> RestartProxyAsync(CancellationToken ct);
 
     /// <summary>Non-generic <see cref="Result"/> — FlushDnsCache's handler returns the

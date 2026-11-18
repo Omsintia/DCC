@@ -260,4 +260,49 @@ public class HelperClientTests
         Assert.Null(await client.UninstallProxyServiceAsync(CancellationToken.None));
         Assert.Null(await client.SetBrowserDohPolicyAsync(enable: false, CancellationToken.None));
     }
+
+    /// <summary>v1.3.0: GetDnsAttributions carries the cursor payload and, uniquely among these
+    /// wrappers, UNWRAPS the <c>Result&lt;DnsAttributionBatch&gt;</c> — attribution is best-effort
+    /// display data with no error surface, so the caller only ever sees a batch or null.</summary>
+    [Fact]
+    public async Task GetDnsAttributionsAsync_serializes_cursor_and_unwraps_the_batch()
+    {
+        IpcRequest? captured = null;
+        Task<string?> Send(string requestJson, CancellationToken ct)
+        {
+            captured = IpcSerializer.DeserializeRequest(requestJson);
+            var canned = Result<DnsAttributionBatch>.Ok(new DnsAttributionBatch(
+                12, new[] { new DnsAttributionEntry(12, 1_752_800_000_123, 4242, "example.com", "chrome") }));
+            return Task.FromResult<string?>(IpcSerializer.SerializePayload(canned));
+        }
+
+        var client = new HelperClient(Send);
+
+        var batch = await client.GetDnsAttributionsAsync(afterSeq: 7, CancellationToken.None);
+
+        Assert.NotNull(captured);
+        Assert.Equal(IpcCommandType.GetDnsAttributions, captured!.Command);
+        Assert.NotNull(captured.PayloadJson);
+        var payload = IpcSerializer.DeserializePayload<DnsAttributionsPayload>(captured.PayloadJson!);
+        Assert.NotNull(payload);
+        Assert.Equal(7, payload!.AfterSeq);
+        Assert.NotNull(batch);
+        Assert.Equal(12, batch!.LastSeq);
+        Assert.Equal("chrome", Assert.Single(batch.Entries).ProcessName);
+    }
+
+    [Fact]
+    public async Task GetDnsAttributionsAsync_collapses_transport_failure_and_unsuccess_to_null()
+    {
+        // Transport failure (null reply) → null.
+        var client = new HelperClient((_, _) => Task.FromResult<string?>(null));
+        Assert.Null(await client.GetDnsAttributionsAsync(0, CancellationToken.None));
+
+        // Unsuccessful helper Result → ALSO null (unknown, never an error surface — the caller
+        // renders "—" either way).
+        var failing = new HelperClient((_, _) => Task.FromResult<string?>(
+            IpcSerializer.SerializePayload(
+                Result<DnsAttributionBatch>.Fail(IpcErrorCode.OperationFailed, "no session"))));
+        Assert.Null(await failing.GetDnsAttributionsAsync(0, CancellationToken.None));
+    }
 }

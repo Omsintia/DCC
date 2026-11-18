@@ -64,7 +64,8 @@ public class WriteConfigEndToEndTests : IDisposable
             new StubProtectionWriter(),
             new StubBinaryInstaller(),
             new StubOrchestrator(),
-            policy));
+            policy,
+            new StubAttributionSource()));
     }
 
     public void Dispose()
@@ -251,5 +252,11 @@ public class WriteConfigEndToEndTests : IDisposable
         public PlatformResult<ProtectionOutcome> EnableProtection(bool withKillSwitch) =>
             PlatformResult<ProtectionOutcome>.Ok(new ProtectionOutcome(false, false, false, null));
         public PlatformResult DisableProtection() => PlatformResult.Ok();
+    }
+
+    private sealed class StubAttributionSource : IDnsAttributionSource
+    {
+        public DnsAttributionSnapshot GetSince(long afterSeq) =>
+            new(0, Array.Empty<DnsAttributionRecord>());
     }
 }

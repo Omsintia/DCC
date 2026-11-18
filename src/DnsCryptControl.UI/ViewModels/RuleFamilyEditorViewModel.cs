@@ -1,6 +1,7 @@
 using System.Linq;
 using CommunityToolkit.Mvvm.ComponentModel;
 using DnsCryptControl.Core.Rules;
+using DnsCryptControl.Ipc.Serialization;
 using DnsCryptControl.Platform;
 using DnsCryptControl.UI.Services;
 
@@ -136,20 +137,41 @@ public sealed partial class RuleFamilyEditorViewModel : ObservableObject, IDispo
     [ObservableProperty]
     private string _summary = "0 rules.";
 
+    /// <summary>True when the current raw text is NONEMPTY but past the list guard (5d-VM-4), so
+    /// <see cref="Rows"/> is empty because the content is UNLISTED, not because there is none. Set
+    /// only by <see cref="PublishOversize"/>; every real parse (<see cref="PublishParse"/>) resets
+    /// it. C2's derived state consumes this so a wired family carrying a saved multi-MB blocklist
+    /// counts as ACTIVE and never wears the "enabled, but empty" banner (an empty-Rows honesty
+    /// signal would otherwise invert into a lie for oversize content).</summary>
+    [ObservableProperty]
+    private bool _isOversizeUnlisted;
+
     /// <summary>
     /// (Re)loads the editor from a family's raw <c>.txt</c> content: parses it, projects the rows,
     /// seeds the raw text and the parse/lint state. Discards any unsaved edits. Synchronous and
     /// UI-thread-affine (the caller supplies the already-read text — the file read is C2/B2's job).
+    /// An oversize body (5d-VM-4) skips the parse for the same lightweight "too large to list"
+    /// state as the other two parse paths: C2 re-Loads every family on tab activation, so a SAVED
+    /// multi-MB list would otherwise re-freeze the UI on every Filtering visit.
     /// </summary>
     public void Load(string? content)
     {
         CancelSession();
-        var result = ParseAndAugment(content);
 
         // The truth is the raw text the user gave us; the canonical text is only used to DETECT
         // divergence and to regenerate after a structured edit. Seeding RawText with the input
         // preserves the user's exact bytes until they choose to canonicalize (IC-1b/IC-4).
-        SetRawTextInternal(content ?? string.Empty);
+        var text = content ?? string.Empty;
+        if (text.Length > OversizeParseSkipChars)
+        {
+            SetRawTextInternal(text);
+            PublishOversize(text.Length);
+            IsDirty = false;
+            return;
+        }
+
+        var result = ParseAndAugment(text);
+        SetRawTextInternal(text);
         PublishParse(result);
         IsDirty = false;
     }
@@ -186,10 +208,11 @@ public sealed partial class RuleFamilyEditorViewModel : ObservableObject, IDispo
         ReparseRawText(); // structured edit → the rows/findings reflect the regenerated raw text
     }
 
-    /// <summary>Perf guard threshold (5d-VM-4): a raw body over the 1 MiB per-request save cap
-    /// (<c>IpcSerializer.MaxBytes</c>) cannot be saved anyway, and parsing tens of thousands of rows would
-    /// freeze the UI on paste. A character count is a cheap over-approximation of the UTF-8 byte cap (≥ 1
-    /// byte/char, plus JSON-escape + envelope inflation), so anything past it is certainly TooLarge.</summary>
+    /// <summary>Perf guard threshold (5d-VM-4): past ~1 MiB the editor stops listing line-by-line —
+    /// building hundreds of thousands of row VMs froze the UI on paste. DECOUPLED from the transport
+    /// cap since v5 (<see cref="IpcSerializer.MaxBytes"/>, 16 MiB): a body between this guard and the
+    /// cap still SAVES verbatim (the helper line-validates it; the proxy skips lines it can't parse) —
+    /// it just isn't itemised here. <see cref="PublishOversize"/> words the summary per tier.</summary>
     private const int OversizeParseSkipChars = 1_048_576;
 
     /// <summary>
@@ -259,14 +282,13 @@ public sealed partial class RuleFamilyEditorViewModel : ObservableObject, IDispo
     /// <summary>Publishes one parse result onto the editor's surfaces (UI-thread-affine): rows,
     /// findings, summary, validity, and the parse-state transition. A parse with any Error finding is
     /// FATAL (Failed + structured disabled); warn-only or clean is editable.</summary>
-    private void PublishParse(RuleParseResult result)
-    {
-        var rows = new RuleRowViewModel[result.Rows.Count];
-        for (var i = 0; i < result.Rows.Count; i++)
-        {
-            rows[i] = new RuleRowViewModel(i + 1, result.Rows[i]);
-        }
+    private void PublishParse(RuleParseResult result) => PublishParse(result, BuildRowViewModels(result));
 
+    /// <summary>The overload the debounced pipeline uses: the row view-models were already BUILT
+    /// off-thread (<see cref="BuildRowViewModels"/>), so the UI thread only pays the array swap and
+    /// the cheap derived-state scans — never an O(n) allocation loop on a large paste.</summary>
+    private void PublishParse(RuleParseResult result, RuleRowViewModel[] rows)
+    {
         Rows = rows;
         Findings = result.Findings;
 
@@ -300,22 +322,45 @@ public sealed partial class RuleFamilyEditorViewModel : ObservableObject, IDispo
 
         IsValid = !hasError;
         IsStructuredEditable = !hasError;
+        IsOversizeUnlisted = false; // a real parse means the rows ARE the content again
         RawParseState = hasError ? RawParseState.Failed : RawParseState.Clean;
         Summary = ComputeSummary(result.Rows, invalidLines);
     }
 
-    /// <summary>5d-VM-4: publishes a lightweight "too large to list" state for a raw body past the save
-    /// cap — empty rows (no tens-of-thousands-of-row build on paste), structured editing disabled, but
-    /// <see cref="IsValid"/> stays TRUE so the Save/Enable path reaches the accurate TooLarge outcome (the
-    /// 1 MiB message) rather than the invalid-lines refusal. UI-thread-affine.</summary>
+    /// <summary>Builds the per-line row view-models for a parse result. Pure — safe to run off the
+    /// UI thread (the row VMs are immutable POCOs), which is exactly where the debounced pipeline
+    /// runs it so a large paste never allocates tens of thousands of rows on the UI thread.</summary>
+    private static RuleRowViewModel[] BuildRowViewModels(RuleParseResult result)
+    {
+        var rows = new RuleRowViewModel[result.Rows.Count];
+        for (var i = 0; i < result.Rows.Count; i++)
+        {
+            rows[i] = new RuleRowViewModel(i + 1, result.Rows[i]);
+        }
+
+        return rows;
+    }
+
+    /// <summary>5d-VM-4: publishes a lightweight "too large to list" state for a raw body past the
+    /// list guard — empty rows (no hundreds-of-thousands-of-row build on paste), structured editing
+    /// disabled, but <see cref="IsValid"/> stays TRUE so Save proceeds (guard-to-cap bodies save
+    /// verbatim) or reaches the accurate TooLarge outcome (past-cap bodies) rather than the
+    /// invalid-lines refusal. Two honest tiers: chars &gt; the byte cap ⟹ certainly unsendable
+    /// (UTF-8 is ≥ 1 byte/char before envelope inflation); otherwise the char count alone cannot
+    /// prove the ENVELOPE bytes fit (savability is decided on the serialized request's UTF-8
+    /// bytes, IC-14), so tier 2 promises only a CONDITIONAL save — "sends it as-is if it fits" —
+    /// with the per-line check deferred to the helper. UI-thread-affine.</summary>
     private void PublishOversize(int length)
     {
         Rows = Array.Empty<RuleRowViewModel>();
         Findings = Array.Empty<RuleLintFinding>();
         IsValid = true;
         IsStructuredEditable = false;
+        IsOversizeUnlisted = true;
         RawParseState = RawParseState.Clean;
-        Summary = $"{length:N0} characters — too large to list here; Save will report the 1 MiB limit.";
+        Summary = length > IpcSerializer.MaxBytes
+            ? $"{length:N0} characters — too large to send to the helper ({IpcSerializer.MaxBytes / 1_048_576} MiB per-request limit); Save will refuse it. Split the list."
+            : $"{length:N0} characters — too large to list line-by-line; Save sends it as-is if it fits the {IpcSerializer.MaxBytes / 1_048_576} MiB request limit (the helper checks each line; the proxy skips lines it can't parse).";
     }
 
     /// <summary>Content-derived summary (IC-16): rule/comment counts + invalid-LINE count over the
@@ -403,14 +448,33 @@ public sealed partial class RuleFamilyEditorViewModel : ObservableObject, IDispo
         {
             await Task.Delay(_debounce, sessionToken).ConfigureAwait(false);
 
-            // The whole run — gate + parse — stays off the UI thread; only the finished result is
-            // marshalled (IC-5). Core parsing is pure/total, so no throw escapes.
+            // Oversize short-circuit (5d-VM-4) on the DEBOUNCED path too — a multi-MB paste lands
+            // here, not in the synchronous ReparseRawText, and parsing + building tens of thousands
+            // of rows for a body that cannot be saved anyway is exactly the paste freeze the guard
+            // documents. Publish the same lightweight state, with the same stale-drop discipline.
+            if (candidate.Length > OversizeParseSkipChars)
+            {
+                _ui.Post(() =>
+                {
+                    if (sessionToken.IsCancellationRequested || RawParseState != RawParseState.Pending)
+                    {
+                        return;
+                    }
+
+                    PublishOversize(candidate.Length);
+                });
+                return;
+            }
+
+            // The whole run — gate + parse + row-VM build — stays off the UI thread; only the
+            // finished result is marshalled (IC-5). Core parsing is pure/total, so no throw escapes.
             await Task.Run(
                 async () =>
                 {
                     await _gate(sessionToken).ConfigureAwait(false);
 
                     var result = ParseAndAugment(candidate);
+                    var rows = BuildRowViewModels(result);
 
                     // Stale drop: a newer edit (or a reload) cancelled this session while the run was
                     // already past its delay — its result describes a text the user moved beyond.
@@ -435,7 +499,7 @@ public sealed partial class RuleFamilyEditorViewModel : ObservableObject, IDispo
                             return;
                         }
 
-                        PublishParse(result);
+                        PublishParse(result, rows);
                     });
                 },
                 sessionToken).ConfigureAwait(false);

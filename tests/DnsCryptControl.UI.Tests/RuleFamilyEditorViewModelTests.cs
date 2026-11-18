@@ -89,10 +89,10 @@ public class RuleFamilyEditorViewModelTests
     [Fact]
     public void oversize_raw_body_skips_the_parse_and_stays_saveable()
     {
-        // 5d-VM-4 (perf, found on the VM): a raw body over the 1 MiB save cap must NOT be parsed into tens of
-        // thousands of rows (that froze the UI for minutes on paste). It skips the parse for a lightweight
-        // "too large to list" state, but stays IsValid so the Save/Enable path reaches the accurate TooLarge
-        // outcome (the 1 MiB message), not the invalid-lines refusal.
+        // 5d-VM-4 (perf, found on the VM): a raw body over the ~1 MiB LIST guard must NOT be parsed into
+        // tens of thousands of rows (that froze the UI for minutes on paste). It skips the parse for a
+        // lightweight "too large to list" state, but stays IsValid — since v5 a guard-to-cap body SAVES
+        // verbatim (helper line-validated), and a past-cap body reaches the accurate TooLarge outcome.
         using var dispatcher = new SynchronousDispatcher();
         var editor = NamesEditor(dispatcher); // NeverDebounce → no background parse can race this
 
@@ -109,7 +109,55 @@ public class RuleFamilyEditorViewModelTests
         Assert.Empty(editor.Rows);               // the guard fired — NOT 80k rows
         Assert.True(editor.IsValid);             // large is not invalid
         Assert.False(editor.IsStructuredEditable);
+        Assert.True(editor.IsOversizeUnlisted);  // empty rows = UNLISTED content, not "no content"
         Assert.Contains("too large", editor.Summary);
+    }
+
+    [Fact]
+    public void oversize_LOAD_publishes_the_lightweight_state_instead_of_parsing()
+    {
+        // The third parse path (5d-VM-4): FilteringViewModel.LoadAsync calls Editor.Load inside a
+        // UI-thread post on EVERY tab activation, so a SAVED multi-MB blocklist re-froze the UI on
+        // every Filtering visit without this guard — the exact freeze the release engineered off
+        // the synchronous-reparse and debounced-paste paths. Load must mirror them.
+        using var dispatcher = new SynchronousDispatcher();
+        using var editor = NamesEditor(dispatcher); // NeverDebounce → no background parse can race this
+
+        var sb = new System.Text.StringBuilder();
+        for (var i = 0; i < 80_000; i++)
+        {
+            sb.Append("*.ads.example\n");
+        }
+
+        var content = sb.ToString();
+        editor.Load(content);
+
+        Assert.Empty(editor.Rows);               // the guard fired — NOT 80k rows
+        Assert.Empty(editor.Findings);
+        Assert.True(editor.IsValid);
+        Assert.False(editor.IsStructuredEditable);
+        Assert.True(editor.IsOversizeUnlisted);
+        Assert.Equal(RawParseState.Clean, editor.RawParseState);
+        Assert.Contains("too large", editor.Summary);
+        // Load's non-parse contract is unchanged: raw text seeded verbatim, unsaved edits discarded.
+        Assert.Equal(content, editor.RawText);
+        Assert.False(editor.IsDirty);
+    }
+
+    [Fact]
+    public void a_normal_parse_resets_the_oversize_unlisted_flag()
+    {
+        // The flag is oversize-publish-only: once a real parse republishes rows, "unlisted" would
+        // be a stale claim — C2's active-count would silently keep counting an empty family.
+        using var dispatcher = new SynchronousDispatcher();
+        using var editor = NamesEditor(dispatcher);
+
+        editor.Load(new string('a', 1_048_577));
+        Assert.True(editor.IsOversizeUnlisted);
+
+        editor.Load("ads.example.com");
+        Assert.False(editor.IsOversizeUnlisted);
+        Assert.Single(editor.Rows);
     }
 
     // ------------------------------------------------------------- A5: extraLint augmentor
@@ -269,6 +317,30 @@ public class RuleFamilyEditorViewModelTests
         Assert.Equal(RawParseState.Clean, vm.RawParseState);
         Assert.Equal(2, vm.Rows.Count);
         Assert.True(vm.IsStructuredEditable);
+    }
+
+    [Fact]
+    public async Task an_oversize_paste_publishes_the_lightweight_state_instead_of_parsing()
+    {
+        using var dispatcher = new SynchronousDispatcher();
+        using var vm = NamesEditor(dispatcher, TestDebounce);
+        vm.Load("ads.example.com");
+        Assert.Single(vm.Rows);
+
+        // A paste past the 1 MiB save cap (5d-VM-4) lands on the DEBOUNCED path, not the synchronous
+        // ReparseRawText — it must publish the same lightweight "too large to list" state as the
+        // synchronous guard, never parse + build hundreds of thousands of rows (the paste freeze).
+        vm.RawText = new string('a', 1_048_577);
+        Assert.Equal(RawParseState.Pending, vm.RawParseState);
+
+        await dispatcher.WaitForPostAsync(); // the debounced oversize publish
+
+        Assert.Empty(vm.Rows);
+        Assert.Empty(vm.Findings);
+        Assert.True(vm.IsValid);              // Save must reach the accurate TooLarge outcome, not an invalid-lines refusal
+        Assert.False(vm.IsStructuredEditable);
+        Assert.Equal(RawParseState.Clean, vm.RawParseState);
+        Assert.Contains("too large", vm.Summary);
     }
 
     [Fact]

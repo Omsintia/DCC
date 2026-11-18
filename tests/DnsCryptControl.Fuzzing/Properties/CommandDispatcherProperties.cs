@@ -148,6 +148,8 @@ public class CommandDispatcherProperties
     [InlineData(IpcCommandType.DisableProtection, 17)]
     [InlineData(IpcCommandType.PlaceOdohCache, 18)]
     [InlineData(IpcCommandType.VerifyResolution, 19)]
+    // v1.3.0 (protocol v5): the read-only per-app attribution poll - appended, never inserted.
+    [InlineData(IpcCommandType.GetDnsAttributions, 20)]
     public void IpcCommandType_numeric_values_are_frozen(IpcCommandType verb, int wireValue) =>
         Assert.Equal(wireValue, (int)verb);
 
@@ -155,7 +157,8 @@ public class CommandDispatcherProperties
     public void IpcCommandType_has_exactly_the_snapshotted_membership() =>
         // If a member is added/removed the count changes here even if no InlineData row does - a tripwire
         // that forces the golden [Theory] above to be updated in lockstep with the wire contract.
-        Assert.Equal(20, Enum.GetValues<IpcCommandType>().Length);
+        // 21 as of v1.3.0 (GetDnsAttributions) - updated in lockstep with the Ipc.Tests pins.
+        Assert.Equal(21, Enum.GetValues<IpcCommandType>().Length);
 
     [Theory]
     [InlineData(IpcErrorCode.None, 0)]

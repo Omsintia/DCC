@@ -6,11 +6,11 @@ using DnsCryptControl.Platform.Diagnostics;
 namespace DnsCryptControl.Ipc.Tests;
 
 // Shared, top-level OPSEC seam fakes so every dispatcher-building call site (the adversarial
-// boundary suite + the pipe-server tests) can construct the full 12-arg HandlerRegistry.Build
+// boundary suite + the pipe-server tests) can construct the full 13-arg HandlerRegistry.Build
 // without re-declaring fakes per file. FakeDnsAdapterConfigurator + FakeLeakMitigationPolicy
 // already live in their own files; these cover the remaining four OPSEC interfaces plus the
-// IProtectionStateWriter spine seam, (Phase 4) IBinaryVerifyInstaller, and (Phase 5b)
-// IConfigWritePolicy.
+// IProtectionStateWriter spine seam, (Phase 4) IBinaryVerifyInstaller, (Phase 5b)
+// IConfigWritePolicy, and (v1.3.0) IDnsAttributionSource.
 
 internal sealed class FakeFirewallKillSwitch : IFirewallKillSwitch
 {
@@ -115,7 +115,27 @@ internal sealed class FakeConfigWritePolicy : IConfigWritePolicy
     }
 }
 
-/// <summary>Centralizes the 12-arg HandlerRegistry.Build wiring for the test suites so every call
+/// <summary>Recording fake for <see cref="IDnsAttributionSource"/> (v1.3.0 per-app attribution).
+/// Empty-ring by default so every existing dispatcher-building call site behaves unchanged; a
+/// test injects records via <see cref="Snapshot"/> and asserts the cursor via
+/// <see cref="LastAfterSeq"/>.</summary>
+internal sealed class FakeDnsAttributionSource : IDnsAttributionSource
+{
+    public DnsAttributionSnapshot Snapshot { get; set; } =
+        new(0, System.Array.Empty<DnsAttributionRecord>());
+
+    public long? LastAfterSeq { get; private set; }
+    public int GetSinceCalls { get; private set; }
+
+    public DnsAttributionSnapshot GetSince(long afterSeq)
+    {
+        GetSinceCalls++;
+        LastAfterSeq = afterSeq;
+        return Snapshot;
+    }
+}
+
+/// <summary>Centralizes the 13-arg HandlerRegistry.Build wiring for the test suites so every call
 /// site uses the same full set of OPSEC fakes. Overloads let a test inject a specific failing
 /// subsystem (e.g. a failing kill switch for the IC-10 failure-propagation test). All optional
 /// params default so existing call sites compile unchanged.</summary>
@@ -129,7 +149,8 @@ internal static class TestHandlerRegistry
         IProtectionStateWriter? protectionWriter = null,
         IBinaryVerifyInstaller? binaryInstaller = null,
         IProtectionOrchestrator? orchestrator = null,
-        IConfigWritePolicy? writePolicy = null) =>
+        IConfigWritePolicy? writePolicy = null,
+        IDnsAttributionSource? attributionSource = null) =>
         HandlerRegistry.Build(
             proxy,
             store,
@@ -142,7 +163,8 @@ internal static class TestHandlerRegistry
             protectionWriter ?? new FakeProtectionStateWriter(),
             binaryInstaller ?? new FakeBinaryVerifyInstaller(),
             orchestrator ?? new FakeProtectionOrchestrator(),
-            writePolicy ?? new FakeConfigWritePolicy());
+            writePolicy ?? new FakeConfigWritePolicy(),
+            attributionSource ?? new FakeDnsAttributionSource());
 
     public static CommandDispatcher BuildDispatcher(
         FakeProxyServiceController proxy,
@@ -152,6 +174,9 @@ internal static class TestHandlerRegistry
         IProtectionStateWriter? protectionWriter = null,
         IBinaryVerifyInstaller? binaryInstaller = null,
         IProtectionOrchestrator? orchestrator = null,
-        IConfigWritePolicy? writePolicy = null) =>
-        new(BuildHandlers(proxy, store, killSwitch, leak, protectionWriter, binaryInstaller, orchestrator, writePolicy));
+        IConfigWritePolicy? writePolicy = null,
+        IDnsAttributionSource? attributionSource = null) =>
+        new(BuildHandlers(
+            proxy, store, killSwitch, leak, protectionWriter, binaryInstaller, orchestrator, writePolicy,
+            attributionSource));
 }

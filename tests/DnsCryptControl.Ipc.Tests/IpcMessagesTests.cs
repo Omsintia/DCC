@@ -24,13 +24,16 @@ public class IpcMessagesTests
             // v4 (v1.2.0, FIX #1): the post-apply real-name resolve check — the local .test
             // self-check false-greens on a dead anonymized route; this verb proves the route.
             IpcCommandType.VerifyResolution,
+            // v5 (v1.3.0): the read-only per-app attribution poll (the helper's in-memory ETW
+            // ring) behind the Query Monitor's App column; rode the v5 framing bump, no v6.
+            IpcCommandType.GetDnsAttributions,
         })
         {
             Assert.True(System.Enum.IsDefined(expected));
         }
-        // Exactly these verbs — a 21st member would silently widen the privileged surface. Any change
+        // Exactly these verbs — a 22nd member would silently widen the privileged surface. Any change
         // here is a deliberate wire change: bump IpcProtocol.Version and update this pin in lockstep.
-        Assert.Equal(20, System.Enum.GetValues<IpcCommandType>().Length);
+        Assert.Equal(21, System.Enum.GetValues<IpcCommandType>().Length);
     }
 
     [Fact]

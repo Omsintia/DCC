@@ -36,6 +36,12 @@ namespace DnsCryptControl.Ipc.Serialization;
 // either is a SILENT serialize failure (source-gen only, reflection off).
 [JsonSerializable(typeof(DnsCryptControl.Platform.Diagnostics.ResolveVerification))]
 [JsonSerializable(typeof(Result<DnsCryptControl.Platform.Diagnostics.ResolveVerification>))]
+// v5 (v1.3.0): the GetDnsAttributions verb's cursor payload AND its Result<DnsAttributionBatch>
+// response — same silent-failure rule as above: omitting a registration breaks the verb without
+// a compile error.
+[JsonSerializable(typeof(DnsAttributionsPayload))]
+[JsonSerializable(typeof(DnsAttributionBatch))]
+[JsonSerializable(typeof(Result<DnsAttributionBatch>))]
 internal sealed partial class IpcJsonContext : JsonSerializerContext
 {
 }

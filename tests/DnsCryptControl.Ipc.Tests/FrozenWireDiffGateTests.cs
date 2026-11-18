@@ -24,22 +24,26 @@ namespace DnsCryptControl.Ipc.Tests;
 public class FrozenWireDiffGateTests
 {
     [Fact]
-    public void PrivilegedVerbCount_is20_afterVerifyResolution()
+    public void PrivilegedVerbCount_is21_afterGetDnsAttributions()
     {
         // 18 through Phase 5j; PlaceOdohCache made 19 (post-5j ODoH fix); VerifyResolution made 20
-        // (v1.2.0, FIX #1 — the post-apply real-name resolve check). A 21st member would silently
-        // widen the privileged surface — kept in lockstep with IpcMessagesTests.
-        Assert.Equal(20, System.Enum.GetValues<IpcCommandType>().Length);
+        // (v1.2.0, FIX #1 — the post-apply real-name resolve check); GetDnsAttributions made 21
+        // (v1.3.0 per-app attribution — the read-only ETW-ring poll behind the Query Monitor's App
+        // column). A 22nd member would silently widen the privileged surface — kept in lockstep
+        // with IpcMessagesTests.
+        Assert.Equal(21, System.Enum.GetValues<IpcCommandType>().Length);
         Assert.True(System.Enum.IsDefined(IpcCommandType.PlaceOdohCache));
         Assert.True(System.Enum.IsDefined(IpcCommandType.VerifyResolution));
+        Assert.True(System.Enum.IsDefined(IpcCommandType.GetDnsAttributions));
     }
 
     [Fact]
-    public void ProtocolVersion_isAt4()
+    public void ProtocolVersion_isAt5()
     {
         // v2 (Phase 5b WriteConfig BaseSha256) → v3 (post-5j PlaceOdohCache verb) → v4 (v1.2.0
-        // VerifyResolution verb). Moves only on a deliberate, reviewed wire change; mirrored by
-        // IpcProtocolTests.
-        Assert.Equal(4, IpcProtocol.Version);
+        // VerifyResolution verb) → v5 (v1.3.0: the framing cap rose 1 → 16 MiB for big-blocklist
+        // WriteRuleFile — a mixed pair loses legal large frames at the transport). Moves only on a
+        // deliberate, reviewed wire change; mirrored by IpcProtocolTests.
+        Assert.Equal(5, IpcProtocol.Version);
     }
 }

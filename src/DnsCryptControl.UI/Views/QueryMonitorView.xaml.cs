@@ -1,5 +1,7 @@
+using System;
 using System.ComponentModel;
 using System.Windows;
+using System.Windows.Controls.Primitives;
 using DnsCryptControl.UI.ViewModels;
 using ContentDialog = Wpf.Ui.Controls.ContentDialog;
 using ContentDialogHost = Wpf.Ui.Controls.ContentDialogHost;
@@ -70,6 +72,21 @@ public partial class QueryMonitorView
     private void Resume_Click(object sender, RoutedEventArgs e) => ViewModel?.Resume();
 
     private void Clear_Click(object sender, RoutedEventArgs e) => ViewModel?.ClearView();
+
+    /// <summary>A header divider is being dragged: forward the horizontal delta to the VM's clamped
+    /// geometry (which both the header and every row bind). The Thumb's Tag names the column.</summary>
+    private void ColumnThumb_DragDelta(object sender, DragDeltaEventArgs e)
+    {
+        if (ViewModel is { } vm && sender is Thumb { Tag: string key } &&
+            Enum.TryParse<QueryMonitorColumn>(key, out var column))
+        {
+            vm.ResizeColumn(column, e.HorizontalChange);
+        }
+    }
+
+    /// <summary>Drag ended: persist the final widths once (never per drag tick).</summary>
+    private void ColumnThumb_DragCompleted(object sender, DragCompletedEventArgs e) =>
+        ViewModel?.CommitColumnWidths();
 
     /// <summary>
     /// Shows the "turn on query logging" consent dialog while the VM has a

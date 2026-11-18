@@ -59,9 +59,18 @@ public class ServiceCompositionGraphTests
         Assert.IsType<IntegrityGatedProxyServiceController>(
             provider.GetRequiredService<DnsCryptControl.Platform.IProxyServiceController>());
 
-        // Both hosted services are registered (pipe server worker + network-change watcher).
-        var hosted = provider.GetServices<IHostedService>();
+        // v1.3.0 per-app attribution: the source the GetDnsAttributions handler reads resolves,
+        // and it is the SAME instance as the hosted watcher (one ring, one demand gate).
+        Assert.NotNull(provider.GetRequiredService<IDnsAttributionSource>());
+
+        // All three hosted services are registered (pipe server worker + network-change watcher +
+        // attribution watcher — the latter hosted ONLY for deterministic ETW teardown at shutdown).
+        var hosted = provider.GetServices<IHostedService>().ToList();
         Assert.Contains(hosted, h => h is PipeServerWorker);
         Assert.Contains(hosted, h => h.GetType().Name == "NetworkChangeWatcher");
+        Assert.Contains(hosted, h => h.GetType().Name == "DnsAttributionWatcher");
+        Assert.Same(
+            provider.GetRequiredService<IDnsAttributionSource>(),
+            hosted.Single(h => h.GetType().Name == "DnsAttributionWatcher"));
     }
 }

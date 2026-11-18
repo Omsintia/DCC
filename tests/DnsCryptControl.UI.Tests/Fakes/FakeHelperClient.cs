@@ -96,6 +96,21 @@ internal sealed class FakeHelperClient : IHelperClient
                 Result<ResolveVerification>.Ok(new ResolveVerification(true, 120, "RCODE=3, ancount=0")));
     }
 
+    /// <summary>v1.3.0: per-app attribution poll — the recorded cursors let a test assert the
+    /// afterSeq round-trip; the unscripted default is an EMPTY batch (helper reachable, nothing
+    /// captured), so pre-existing tests keep their "—" (unknown) behavior. A degraded-transport
+    /// test scripts a null reply.</summary>
+    public List<long> GetDnsAttributionsCalls { get; } = new();
+    public Func<long, CancellationToken, Task<DnsAttributionBatch?>>? GetDnsAttributionsHandler { get; set; }
+
+    public Task<DnsAttributionBatch?> GetDnsAttributionsAsync(long afterSeq, CancellationToken ct)
+    {
+        GetDnsAttributionsCalls.Add(afterSeq);
+        return GetDnsAttributionsHandler?.Invoke(afterSeq, ct)
+            ?? Task.FromResult<DnsAttributionBatch?>(
+                new DnsAttributionBatch(0, Array.Empty<DnsAttributionEntry>()));
+    }
+
     public Task<Result<ServiceLifecycleResponse>?> RestartProxyAsync(CancellationToken ct)
     {
         RestartProxyCalls++;

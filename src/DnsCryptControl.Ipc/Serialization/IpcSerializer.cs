@@ -14,8 +14,14 @@ namespace DnsCryptControl.Ipc.Serialization;
 /// </summary>
 public static class IpcSerializer
 {
-    /// <summary>Maximum accepted frame size in bytes (covers a large TOML payload, not unbounded).</summary>
-    public const int MaxBytes = 1_048_576; // 1 MiB
+    /// <summary>Maximum accepted frame size in bytes — bounded, never unbounded (CWE-400). Raised
+    /// 1 MiB → 16 MiB in protocol v5 so a big community blocklist (the official DNSCrypt domains
+    /// list is ~9 MB) fits one validated WriteRuleFile request; the pipe is serial, so the worst
+    /// transient allocation a local peer can force stays a single frame of this size — and for an
+    /// UNTRUSTED peer it is tighter still: the server's deny path reads its discarded frame under
+    /// a 1 MiB pre-trust cap, so the full 16 MiB is only ever buffered for a verified caller.
+    /// Payloads with tighter business bounds (the config save) enforce their OWN cap below this.</summary>
+    public const int MaxBytes = 16_777_216; // 16 MiB
 
     // Both this pre-pass reader and IpcJsonContext [JsonSourceGenerationOptions] cap depth at 16, enforcing the limit consistently.
     private static readonly JsonReaderOptions ReaderGuard = new() { MaxDepth = 16 };

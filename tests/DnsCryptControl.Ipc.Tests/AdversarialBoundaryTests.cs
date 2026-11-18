@@ -116,7 +116,8 @@ public class AdversarialBoundaryTests
     public void OversizedFrame_failsClosed()
     {
         var d = BuildDispatcher(out _);
-        var huge = "{\"Command\":0,\"PayloadJson\":\"" + new string('a', 2_000_000) + "\"}";
+        // Sized off the cap so it tracks cap changes (a 2 MB literal silently stopped being oversize in v5).
+        var huge = "{\"Command\":0,\"PayloadJson\":\"" + new string('a', IpcSerializer.MaxBytes + 64) + "\"}";
         var result = IpcSerializer.DeserializePayload<Result>(d.Dispatch(huge));
         Assert.False(result!.Success);
         Assert.Equal(IpcErrorCode.ValidationFailed, result.Code); // deserialize rejected -> ValidationFailed

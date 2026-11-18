@@ -1,6 +1,7 @@
 using System.IO;
 using System.Text;
 using DnsCryptControl.Ipc;
+using DnsCryptControl.Ipc.Commands;
 using DnsCryptControl.Ipc.Serialization;
 using DnsCryptControl.Platform;
 using DnsCryptControl.UI.Services;
@@ -13,7 +14,8 @@ namespace DnsCryptControl.UI.Tests;
 /// <c>.txt</c> files. Reads mirror <see cref="ResolverListReader"/> — shared
 /// (ReadWrite|Delete) access so a concurrent helper replace never throws, fail-closed to a
 /// typed <see cref="RuleFileState"/> (Present/Missing/Unreadable), never a throw. Writes run
-/// the 1 MiB pre-check (IC-14) then map the helper reply into a typed
+/// the protocol-version gate, then the frame pre-check (IC-14, against the 16 MiB
+/// <c>IpcSerializer.MaxBytes</c>), then map the helper reply into a typed
 /// <see cref="RuleFileWriteOutcome"/> (Applied/Rejected/HelperUnavailable/TooLarge) with
 /// verbatim messages (IC-10). Nothing here touches a real pipe or the real %ProgramData%.
 /// </summary>
@@ -177,13 +179,13 @@ public class RuleFileServiceTests
     [Fact]
     public void ReadRuleFile_overSizedFile_failsClosed_to_Unreadable()
     {
-        // Symmetric with the 1 MiB WRITE cap: a pathologically large file fails closed to Unreadable
-        // rather than buffering an unbounded string. The bound is 8x IpcSerializer.MaxBytes.
+        // Symmetric with the per-request WRITE cap: a pathologically large file fails closed to
+        // Unreadable rather than buffering an unbounded string. The bound is 2x IpcSerializer.MaxBytes.
         var dir = NewTempDir();
         try
         {
             var path = PathIn(dir, RuleFileKind.BlockedNames);
-            var bytes = new byte[8L * IpcSerializer.MaxBytes + 1024];
+            var bytes = new byte[2L * IpcSerializer.MaxBytes + 1024];
             Array.Fill(bytes, (byte)'a');
             File.WriteAllBytes(path, bytes);
 
@@ -285,14 +287,69 @@ public class RuleFileServiceTests
     {
         var fake = new FakeHelperClient();
         var svc = new RuleFileService(fake, NewTempDir());
-        // > 1 MiB of body guarantees the serialized frame exceeds IpcSerializer.MaxBytes.
-        var huge = new string('a', 1_048_576 + 64);
+        // A body past MaxBytes guarantees the serialized frame exceeds it (1 byte/char + envelope).
+        var huge = new string('a', IpcSerializer.MaxBytes + 64);
 
         var outcome = await svc.WriteRuleFileAsync(RuleFileKind.BlockedNames, huge, CancellationToken.None);
 
         Assert.Equal(RuleFileWriteOutcomeKind.TooLarge, outcome.Kind);
         Assert.NotNull(outcome.Message);
         Assert.Empty(fake.WriteRuleFileCalls); // pre-check short-circuits — pipe never touched
+    }
+
+    [Fact]
+    public async Task Write_mismatched_protocol_version_is_Rejected_without_calling_the_helper()
+    {
+        // FIX G (v5 wire): the framing cap raise means an older helper's transport silently drops
+        // a legal large frame — a lost reply indistinguishable from a dead helper. The pre-write
+        // version gate (mirroring ConfigFileService) must refuse the mixed pair with the same
+        // actionable wording BEFORE any WriteRuleFile frame is sent.
+        var fake = new FakeHelperClient
+        {
+            GetStatusHandler = _ => Task.FromResult<Result<StatusResponse>?>(
+                Result<StatusResponse>.Ok(new StatusResponse(true, "resolver", false, false, IpcProtocol.Version - 1, "1.0.0"))),
+        };
+        var svc = new RuleFileService(fake, NewTempDir());
+
+        var outcome = await svc.WriteRuleFileAsync(RuleFileKind.BlockedNames, "*.ads.example\n", CancellationToken.None);
+
+        Assert.Equal(RuleFileWriteOutcomeKind.Rejected, outcome.Kind);
+        Assert.Equal(
+            $"helper protocol version {IpcProtocol.Version - 1} does not match this app's ({IpcProtocol.Version}) — update the helper and app together, then retry",
+            outcome.Message);
+        Assert.Empty(fake.WriteRuleFileCalls); // the gate short-circuits — the write verb never sent
+    }
+
+    [Fact]
+    public async Task Write_status_unavailable_maps_to_HelperUnavailable_without_calling_the_helper()
+    {
+        // A helper that can't even answer GetStatus can't be version-checked — fail closed the
+        // same way the config save path does ("the save was not attempted").
+        var fake = new FakeHelperClient
+        {
+            GetStatusHandler = _ => Task.FromResult<Result<StatusResponse>?>(null),
+        };
+        var svc = new RuleFileService(fake, NewTempDir());
+
+        var outcome = await svc.WriteRuleFileAsync(RuleFileKind.BlockedNames, "*.ads.example\n", CancellationToken.None);
+
+        Assert.Equal(RuleFileWriteOutcomeKind.HelperUnavailable, outcome.Kind);
+        Assert.Empty(fake.WriteRuleFileCalls);
+    }
+
+    [Fact]
+    public async Task Write_matching_protocol_version_proceeds_unchanged()
+    {
+        // The fake's unscripted GetStatus reports IpcProtocol.Version — the gate must be
+        // invisible on the healthy path (status checked, then the write goes through as before).
+        var fake = new FakeHelperClient();
+        var svc = new RuleFileService(fake, NewTempDir());
+
+        var outcome = await svc.WriteRuleFileAsync(RuleFileKind.BlockedNames, "*.ads.example\n", CancellationToken.None);
+
+        Assert.Equal(RuleFileWriteOutcomeKind.Applied, outcome.Kind);
+        Assert.Equal(1, fake.GetStatusCalls);
+        Assert.Single(fake.WriteRuleFileCalls);
     }
 
     [Fact]

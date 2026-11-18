@@ -980,15 +980,17 @@ public sealed partial class ResolversViewModel : ObservableObject, IDisposable
 
     /// <summary>Maps a save outcome onto the state surfaces (reload-first ordering, mirror ConfigurationViewModel).
     /// <paramref name="dispatched"/> is the exact op snapshot the save sent: on a write-landed
-    /// outcome exactly those ops are removed, leaving ops staged mid-flight intact (mvvm-F4).</summary>
+    /// outcome exactly those ops are removed, leaving ops staged mid-flight intact (mvvm-F4).
+    /// Runs on a pool thread, so it never reads <c>_staged</c>: whether a mid-flight edit is still staged
+    /// (skip the reload that would destroy it) comes back FROM the UI-thread removal itself
+    /// (<see cref="RemoveDispatchedOpsAsync"/>).</summary>
     private async Task ApplySaveOutcomeAsync(
         ConfigSaveOutcome outcome, IReadOnlyList<StagedOp> dispatched, IReadOnlyList<string> disabledPins)
     {
         switch (outcome.Kind)
         {
             case ConfigSaveOutcomeKind.Applied:
-                RemoveDispatchedOps(dispatched);
-                if (_staged.Count == 0)
+                if (await RemoveDispatchedOpsAsync(dispatched).ConfigureAwait(false) == 0)
                 {
                     await LoadAsync(CancellationToken.None).ConfigureAwait(false);
                     _ui.Post(() =>
@@ -1010,8 +1012,7 @@ public sealed partial class ResolversViewModel : ObservableObject, IDisposable
                 break;
 
             case ConfigSaveOutcomeKind.RestartFailed:
-                RemoveDispatchedOps(dispatched);
-                if (_staged.Count == 0)
+                if (await RemoveDispatchedOpsAsync(dispatched).ConfigureAwait(false) == 0)
                     await LoadAsync(CancellationToken.None).ConfigureAwait(false);
                 _ui.Post(() =>
                 {
@@ -1022,8 +1023,7 @@ public sealed partial class ResolversViewModel : ObservableObject, IDisposable
                 break;
 
             case ConfigSaveOutcomeKind.ProxyRejected:
-                RemoveDispatchedOps(dispatched);
-                if (_staged.Count == 0)
+                if (await RemoveDispatchedOpsAsync(dispatched).ConfigureAwait(false) == 0)
                     await LoadAsync(CancellationToken.None).ConfigureAwait(false);
                 _ui.Post(() =>
                 {
@@ -1388,19 +1388,44 @@ public sealed partial class ResolversViewModel : ObservableObject, IDisposable
             $"{names} {verb} in disabled_server_names and won't be used — remove {(disabledPins.Count == 1 ? "it" : "them")} from the disabled list to activate this pick.";
     }
 
-    /// <summary>Removes exactly the dispatched ops (write-landed) and re-derives dirty/block.</summary>
-    private void RemoveDispatchedOps(IReadOnlyList<StagedOp> dispatched)
+    /// <summary>Removes exactly the dispatched ops (write-landed; an op re-staged mid-flight is a new instance
+    /// and survives — mvvm-F4) and re-derives dirty/block, then completes with the number of staged edits
+    /// that REMAIN — the caller's "reload" vs "an edit made during the save is still unsaved" signal.
+    ///
+    /// <para>Threading contract: <c>_staged</c> is UI-thread-confined (IC-5), so the removal AND the count
+    /// happen inside ONE dispatcher post and the count travels back through the task. The caller runs on a
+    /// pool thread and must branch on that result, never re-read <c>_staged</c>: production's Post is
+    /// <c>Dispatcher.BeginInvoke</c>, so right after posting the removal has NOT run yet — reading the count
+    /// there made every normal save look edited-mid-flight and skip its post-save reload. The task runs its
+    /// continuations asynchronously, so the rest of the save resumes on the pool, never inline on the UI
+    /// thread; a fault inside the post faults the task (the save's <c>finally</c> still clears busy) instead
+    /// of stranding the save. An inline dispatcher (the unit tests) returns an already-completed task; a post
+    /// dropped at shutdown leaves it pending and the save simply stops — nothing is left to update.</para></summary>
+    private Task<int> RemoveDispatchedOpsAsync(IReadOnlyList<StagedOp> dispatched)
     {
+        var removed = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         _ui.Post(() =>
         {
-            foreach (var op in dispatched)
+            int remaining;
+            try
             {
-                if (_staged.TryGetValue(op.KeyPath, out var current) && ReferenceEquals(current, op))
-                    _staged.Remove(op.KeyPath);
+                foreach (var op in dispatched)
+                {
+                    if (_staged.TryGetValue(op.KeyPath, out var current) && ReferenceEquals(current, op))
+                        _staged.Remove(op.KeyPath);
+                }
+                IsDirty = _staged.Count > 0;
+                RecomputeSaveBlock();
+                remaining = _staged.Count;
             }
-            IsDirty = _staged.Count > 0;
-            RecomputeSaveBlock();
+            catch (Exception ex)
+            {
+                removed.SetException(ex);
+                return;
+            }
+            removed.SetResult(remaining);
         });
+        return removed.Task;
     }
 
     /// <summary>Revert: discard staged edits + fresh reload. Non-cancellable.</summary>

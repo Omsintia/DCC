@@ -164,6 +164,109 @@ public class FilteringViewModelTests
         Assert.Contains("not found", h.Vm.LoadError);
     }
 
+    // ------------------------------------------------------------- import-from-file (v1.3.0)
+
+    /// <summary>A temp rule-list file for the import tests; deleted with the harness scope.</summary>
+    private static string TempListFile(string content)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"dcc-import-{Guid.NewGuid():N}.txt");
+        File.WriteAllText(path, content);
+        return path;
+    }
+
+    [Fact]
+    public async Task import_loads_the_file_into_the_editor_as_a_dirty_paste_and_writes_nothing()
+    {
+        using var h = new Harness();
+        h.Config.NextLoad = ConfigLoadResult.Ok(string.Empty, Sha); // no *_file key → ours to import into
+        await h.Vm.LoadAsync(CancellationToken.None);
+
+        var path = TempListFile("ads.example.com\ntracker.example.com\n");
+        try
+        {
+            await h.Vm.ImportFamilyFileAsync(RuleFamily.BlockedNames, path, CancellationToken.None);
+
+            var blocked = h.Vm.Editors.Single(e => e.Kind == RuleFileKind.BlockedNames);
+            Assert.Equal("ads.example.com\ntracker.example.com\n", blocked.RawText);
+            Assert.True(blocked.IsDirty); // exactly a paste — the user still reviews and Saves
+            Assert.Contains("imported", h.Vm.FamilyNotices[RuleFamily.BlockedNames]);
+            Assert.False(h.Vm.FamilyErrors.ContainsKey(RuleFamily.BlockedNames));
+            Assert.Empty(h.Rules.WriteCalls); // the import itself NEVER writes
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public async Task import_refuses_an_externally_managed_family()
+    {
+        using var h = new Harness();
+        // The *_file key points at a path the user manages — no-hijack (IC-12) applies to import too.
+        h.Config.NextLoad = ConfigLoadResult.Ok(
+            "[blocked_names]\nblocked_names_file = 'C:/their/own-list.txt'\n", Sha);
+        await h.Vm.LoadAsync(CancellationToken.None);
+
+        var path = TempListFile("ads.example.com\n");
+        try
+        {
+            var blocked = h.Vm.Editors.Single(e => e.Kind == RuleFileKind.BlockedNames);
+            var before = blocked.RawText;
+
+            await h.Vm.ImportFamilyFileAsync(RuleFamily.BlockedNames, path, CancellationToken.None);
+
+            Assert.Equal(before, blocked.RawText); // untouched
+            Assert.Contains("external", h.Vm.FamilyErrors[RuleFamily.BlockedNames]);
+            Assert.False(h.Vm.FamilyNotices.ContainsKey(RuleFamily.BlockedNames));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public async Task import_refuses_a_file_over_the_transport_cap()
+    {
+        using var h = new Harness();
+        h.Config.NextLoad = ConfigLoadResult.Ok(string.Empty, Sha);
+        await h.Vm.LoadAsync(CancellationToken.None);
+
+        var path = Path.Combine(Path.GetTempPath(), $"dcc-import-{Guid.NewGuid():N}.txt");
+        try
+        {
+            // One byte over the cap: refused at pick time — a file this size could never be SAVED.
+            using (var fs = new FileStream(path, FileMode.CreateNew))
+            {
+                fs.SetLength(FilteringViewModel.ImportMaxBytes + 1);
+            }
+
+            await h.Vm.ImportFamilyFileAsync(RuleFamily.BlockedNames, path, CancellationToken.None);
+
+            Assert.Contains("MiB", h.Vm.FamilyErrors[RuleFamily.BlockedNames]);
+            var blocked = h.Vm.Editors.Single(e => e.Kind == RuleFileKind.BlockedNames);
+            Assert.False(blocked.IsDirty);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public async Task import_refuses_binary_content_and_a_missing_file()
+    {
+        using var h = new Harness();
+        h.Config.NextLoad = ConfigLoadResult.Ok(string.Empty, Sha);
+        await h.Vm.LoadAsync(CancellationToken.None);
+
+        var binary = TempListFile("ads.example.com\0junk");
+        try
+        {
+            await h.Vm.ImportFamilyFileAsync(RuleFamily.BlockedNames, binary, CancellationToken.None);
+            Assert.Contains("binary", h.Vm.FamilyErrors[RuleFamily.BlockedNames]);
+        }
+        finally { File.Delete(binary); }
+
+        await h.Vm.ImportFamilyFileAsync(
+            RuleFamily.BlockedNames,
+            Path.Combine(Path.GetTempPath(), $"dcc-gone-{Guid.NewGuid():N}.txt"),
+            CancellationToken.None);
+        Assert.Contains("no longer exists", h.Vm.FamilyErrors[RuleFamily.BlockedNames]);
+    }
+
     // ------------------------------------------------------------- enable-and-wire (IC-12)
 
     [Fact]
@@ -601,6 +704,35 @@ public class FilteringViewModelTests
         Assert.Contains("2 rules", h.Vm.FamilySummaries[RuleFamily.BlockedNames]);
         Assert.Contains("1 comment", h.Vm.FamilySummaries[RuleFamily.BlockedNames]);
         // One family wired-and-populated → one active.
+        Assert.Contains("1 of 6", h.Vm.ActiveFamiliesHeadline);
+    }
+
+    [Fact]
+    public async Task wired_family_with_an_oversize_unlisted_body_is_active_and_not_banner_flagged()
+    {
+        // Honesty inversion (FIX F): an oversize body (5d-VM-4) has EMPTY Rows because the content
+        // is UNLISTED, not absent. A wired family carrying a saved 200k-domain blocklist must count
+        // toward the headline and must NOT wear the "enabled, but empty — nothing is blocked yet"
+        // banner — rules==0 alone would turn the honesty signal into a lie here.
+        using var h = new Harness();
+        h.Config.NextLoad = ConfigLoadResult.Ok(
+            WiredConfig("blocked_names", "blocked_names_file", "blocked-names.txt"), Sha);
+        var sb = new System.Text.StringBuilder();
+        for (var i = 0; i < 80_000; i++)
+        {
+            sb.Append("*.ads.example\n"); // ~1.12 MiB — past the list guard, well under the send cap
+        }
+
+        h.Rules.Reads[RuleFileKind.BlockedNames] =
+            new RuleFileSnapshot(sb.ToString(), RuleFileState.Present, DateTime.UtcNow);
+
+        await h.Vm.LoadAsync(CancellationToken.None);
+
+        var blocked = h.Vm.Editors.Single(e => e.Kind == RuleFileKind.BlockedNames);
+        Assert.True(blocked.IsOversizeUnlisted);
+        Assert.Empty(blocked.Rows); // unlisted, per the perf guard…
+        // …yet the family is ACTIVE (the content is nonempty — we just don't itemise it):
+        Assert.False(h.Vm.EmptyButWiredBanners.ContainsKey(RuleFamily.BlockedNames));
         Assert.Contains("1 of 6", h.Vm.ActiveFamiliesHeadline);
     }
 

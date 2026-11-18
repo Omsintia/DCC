@@ -38,3 +38,30 @@ public sealed record ProtectionResponse(
     bool LeakMitigationsEnabled,
     bool RebootRecommended,
     string? KillSwitchAdvisory);
+
+/// <summary>GetDnsAttributions cursor (v1.3.0): return only ring entries with
+/// <c>Seq &gt; AfterSeq</c> — the UI passes back the last <see cref="DnsAttributionBatch.LastSeq"/>
+/// so each attribution crosses the pipe exactly once. A null/absent payload means
+/// <c>AfterSeq = 0</c> (everything the ring still holds); the handler never rejects it —
+/// this is a read-only verb with nothing to validate.</summary>
+public sealed record DnsAttributionsPayload(long AfterSeq);
+
+/// <summary>One GetDnsAttributions read: the ring's current high-water sequence number (the
+/// caller's next-poll cursor, advanced even when the matching entries were already evicted so a
+/// slow poller skips ahead instead of replaying) plus the entries newer than the caller's cursor,
+/// oldest → newest.</summary>
+public sealed record DnsAttributionBatch(long LastSeq, IReadOnlyList<DnsAttributionEntry> Entries);
+
+/// <summary>One attributed DNS lookup on the wire (mirrors <c>Platform.DnsAttributionRecord</c>
+/// field-for-field, keeping the wire contract decoupled from the Platform type): the ETW header's
+/// originating <paramref name="ProcessId"/> plus the queried name, with the process image name
+/// resolved AT CAPTURE (PIDs are reused; a later lookup could name the wrong process) —
+/// <paramref name="ProcessName"/> is null when the process had already exited. Best-effort
+/// observability data, never trust-bearing.</summary>
+/// <param name="Seq">The ring sequence number (the per-entry cursor position).</param>
+/// <param name="UnixTimeMs">Capture time (Unix milliseconds, UTC) for time-window correlation.</param>
+/// <param name="ProcessId">The originating process's PID from the ETW event header.</param>
+/// <param name="QueryName">The looked-up name, verbatim from the event payload.</param>
+/// <param name="ProcessName">The image name resolved at capture, or null if the process had exited.</param>
+public sealed record DnsAttributionEntry(
+    long Seq, long UnixTimeMs, int ProcessId, string QueryName, string? ProcessName);

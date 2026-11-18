@@ -30,7 +30,8 @@ public static class HandlerRegistry
         IProtectionStateWriter protectionWriter,
         IBinaryVerifyInstaller binaryInstaller,
         IProtectionOrchestrator orchestrator,
-        IConfigWritePolicy writePolicy)
+        IConfigWritePolicy writePolicy,
+        IDnsAttributionSource attributionSource)
     {
         ArgumentNullException.ThrowIfNull(proxy);
         ArgumentNullException.ThrowIfNull(store);
@@ -44,6 +45,7 @@ public static class HandlerRegistry
         ArgumentNullException.ThrowIfNull(binaryInstaller);
         ArgumentNullException.ThrowIfNull(orchestrator);
         ArgumentNullException.ThrowIfNull(writePolicy);
+        ArgumentNullException.ThrowIfNull(attributionSource);
 
         var handlers = new List<ICommandHandler>
         {
@@ -71,6 +73,10 @@ public static class HandlerRegistry
             // v4 (FIX #1): the post-apply real-name resolve check — reuses the same probe seam
             // (deliberately NOT a new Build parameter; that would ripple every test call site).
             new VerifyResolutionHandler(diagnostics),
+            // v5 (v1.3.0): the per-app attribution read — a NEW seam this time (no existing
+            // interface exposes the helper's in-memory attribution ring), threaded through Build
+            // the same way IConfigStore reaches WriteRuleFileHandler.
+            new GetDnsAttributionsHandler(attributionSource),
             // Phase 4 — supply chain (the last Unsupported verb becomes real).
             new VerifyAndInstallBinaryHandler(binaryInstaller),
             // Phase 5a (A4) — BE-8: the atomic master-toggle enable/disable verbs.

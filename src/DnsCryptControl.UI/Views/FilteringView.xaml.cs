@@ -44,6 +44,28 @@ public partial class FilteringView
         }
     }
 
+    /// <summary>Import a rule-list file into a family's editor (the paste-free big-blocklist path).
+    /// View plumbing only: the file picker runs here; the VM does the bounded read + refusals
+    /// (externally-managed, over-cap, binary) and the text lands as an ordinary editor paste —
+    /// nothing is written until the user's explicit Save.</summary>
+    private async void ImportFamily_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is { } vm && TryFamily(sender, out var family))
+        {
+            var dialog = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "Import a rule list",
+                Filter = "Rule lists (*.txt;*.list;*.conf)|*.txt;*.list;*.conf|All files (*.*)|*.*",
+                CheckFileExists = true,
+            };
+
+            if (dialog.ShowDialog(Window.GetWindow(this)) == true)
+            {
+                await vm.ImportFamilyFileAsync(family, dialog.FileName, CancellationToken.None).ConfigureAwait(true);
+            }
+        }
+    }
+
     /// <summary>Save a family's edited <c>.txt</c> body (IC-13 no-CAS). The VM's own IsValid gate
     /// refuses a FATAL-lint text (IC-11) and surfaces the per-family error banner.</summary>
     private async void FamilySave_Click(object sender, RoutedEventArgs e)

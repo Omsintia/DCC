@@ -19,5 +19,15 @@ public static class IpcProtocol
     // check — the local .test self-check false-greens on a dead anonymized route). Additive,
     // same mixed-pair rationale as v3: a v3 helper would answer UnsupportedHandler, so the
     // handshake refuses the pair up front.
-    public const int Version = 4;
+    //
+    // v5 (v1.3.0): the FRAMING contract changed — IpcSerializer.MaxBytes rose 1 MiB → 16 MiB
+    // so a big community blocklist fits one WriteRuleFile request. Not additive: a v4 helper
+    // would silently REJECT a legal v5 frame at the transport (a lost reply, indistinguishable
+    // from a dead helper), so mixed pairs must be refused by the handshake, not left to fail
+    // confusingly on the first large save — BOTH write paths (ConfigFileService.SaveAndApplyAsync
+    // and RuleFileService.WriteRuleFileAsync) run the pre-write GetStatus version compare and
+    // refuse a mixed pair before sending. v5 ALSO carries the GetDnsAttributions verb (per-app
+    // query attribution — the Query Monitor's App column): both shipped in the same release, so
+    // the verb RIDES the framing bump rather than costing a v6 of its own.
+    public const int Version = 5;
 }

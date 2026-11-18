@@ -53,6 +53,21 @@ public class ResolversViewModelTests
             Assert.True(_pending.TryDequeue(out var action), "no queued post to run");
             action!();
         }
+
+        /// <summary>Plays the UI thread through a whole async flow: runs each queued post IN ARRIVAL
+        /// ORDER on the calling (test) thread until <paramref name="settled"/> holds, waiting for the
+        /// next post whenever it does not. A post never runs inside <see cref="Post"/> itself — the
+        /// semantics of production's <c>Dispatcher.BeginInvoke</c> — so a pool-thread continuation that
+        /// reads state a queued post has not applied yet misbehaves here exactly as it does in the app
+        /// (the inline <see cref="SynchronousDispatcher"/> hides that whole class of bug).</summary>
+        public async Task RunPostsUntilAsync(Func<bool> settled)
+        {
+            while (!settled())
+            {
+                await WaitForQueuedPostAsync();
+                RunNext();
+            }
+        }
     }
 
     private sealed class FakeConfigFileService : IConfigFileService
@@ -174,7 +189,7 @@ public class ResolversViewModelTests
         FakeListReader Lists,
         FakeHelperClient Helper,
         FakeUiStateStore Store,
-        SynchronousDispatcher Dispatcher,
+        IUiDispatcher Dispatcher,
         FakeProber Prober,
         FakeProbeGate Gate);
 
@@ -183,7 +198,8 @@ public class ResolversViewModelTests
         IEnumerable<ResolverListSnapshot>? snapshots = null,
         UiState? uiState = null,
         bool killSwitchEnabled = false,
-        bool statusOk = true)
+        bool statusOk = true,
+        IUiDispatcher? dispatcher = null)
     {
         var file = new FakeConfigFileService { NextLoad = ConfigLoadResult.Ok(configText, Sha) };
         var lists = new FakeListReader();
@@ -197,11 +213,11 @@ public class ResolversViewModelTests
                     : null),
         };
         var store = new FakeUiStateStore { State = uiState ?? new UiState() };
-        var dispatcher = new SynchronousDispatcher();
+        var ui = dispatcher ?? new SynchronousDispatcher();
         var prober = new FakeProber();
         var gate = new FakeProbeGate();
-        var vm = new ResolversViewModel(file, lists, helper, store, dispatcher, prober, gate);
-        return new Harness(vm, file, lists, helper, store, dispatcher, prober, gate);
+        var vm = new ResolversViewModel(file, lists, helper, store, ui, prober, gate);
+        return new Harness(vm, file, lists, helper, store, ui, prober, gate);
     }
 
     private static async Task<Harness> LoadedAsync(
@@ -1028,6 +1044,134 @@ public class ResolversViewModelTests
         await h.Vm.SaveAndApplyCommand.ExecuteAsync(null);
 
         Assert.Equal("OPSEC guard: nope", h.Vm.SaveError);
+    }
+
+    // ---- C2 outcome under a QUEUED dispatcher ----
+    //
+    // Production's IUiDispatcher is Dispatcher.BeginInvoke — a post is QUEUED, never run inline — while the
+    // save tests above run on the inline SynchronousDispatcher. The outcome handler runs on a pool thread
+    // (the save awaits with ConfigureAwait(false)); it used to queue the dispatched-op removal and then read
+    // the staged count straight away, before that removal had run. Under BeginInvoke the count was therefore
+    // never 0: a perfectly normal save said "an edit made during the save is still unsaved" and SKIPPED the
+    // post-save reload (stale server_names baseline → a false "changed on disk" conflict on the next save).
+    // These tests queue every post and pump them in order on the test thread — the UI thread.
+
+    /// <summary>A loaded harness whose dispatcher QUEUES every post; the load's one publication is pumped here.</summary>
+    private static async Task<Harness> LoadedOnQueuedDispatcherAsync(
+        QueueingDispatcher ui, string configText, IEnumerable<ResolverListSnapshot> snapshots)
+    {
+        var h = Build(configText, snapshots, dispatcher: ui);
+        var load = h.Vm.LoadAsync(CancellationToken.None);
+        await ui.WaitForQueuedPostAsync();
+        ui.RunNext(); // the load's single publication post
+        await load;
+        return h;
+    }
+
+    /// <summary>Runs one Save &amp; apply to completion with the test thread as the UI thread: every post is
+    /// pumped in arrival order until the save's final busy-clear post has run (it is always the LAST post).</summary>
+    private static async Task SaveOnQueuedDispatcherAsync(Harness h, QueueingDispatcher ui)
+    {
+        var save = h.Vm.SaveAndApplyCommand.ExecuteAsync(null);
+        await ui.RunPostsUntilAsync(() => !h.Vm.IsBusy);
+        await save;
+    }
+
+    [Fact]
+    public async Task applied_save_on_a_queued_dispatcher_reloads_and_reports_a_clean_save()
+    {
+        using var ui = new QueueingDispatcher();
+        var h = await LoadedOnQueuedDispatcherAsync(ui, "server_names = ['cloudflare']\n", TwoServerList());
+        h.Vm.AddToPool(Row(h.Vm, "quad9"));
+        h.File.NextLoad = ConfigLoadResult.Ok("server_names = ['cloudflare']\n", Sha2);
+        var appliedSha = new string('c', 64);
+        ScriptApplied(h.File, "server_names = ['cloudflare', 'quad9']\n", appliedSha);
+        var loadsBefore = h.File.LoadCalls;
+
+        await SaveOnQueuedDispatcherAsync(h, ui);
+
+        Assert.Equal("Configuration saved and applied.", h.Vm.SaveNotice); // never the false "still unsaved"
+        Assert.Equal(loadsBefore + 2, h.File.LoadCalls); // the IC-9 fresh read + the post-save reload
+        Assert.Equal(appliedSha, h.Vm.BaseSha256);        // re-baselined on the bytes the helper just wrote
+        Assert.False(h.Vm.IsDirty);
+    }
+
+    [Theory]
+    [InlineData(ConfigSaveOutcomeKind.RestartFailed)]
+    [InlineData(ConfigSaveOutcomeKind.ProxyRejected)]
+    public async Task write_landed_failure_on_a_queued_dispatcher_still_reloads_then_posts_its_state(ConfigSaveOutcomeKind kind)
+    {
+        using var ui = new QueueingDispatcher();
+        var h = await LoadedOnQueuedDispatcherAsync(ui, "server_names = ['cloudflare']\n", TwoServerList());
+        h.Vm.AddToPool(Row(h.Vm, "quad9"));
+        h.File.NextLoad = ConfigLoadResult.Ok("server_names = ['cloudflare']\n", Sha2);
+        var landedSha = new string('c', 64);
+        h.File.SaveHandler = (_, _, _) =>
+        {
+            h.File.NextLoad = ConfigLoadResult.Ok("server_names = ['cloudflare', 'quad9']\n", landedSha);
+            return Task.FromResult(new ConfigSaveOutcome(kind, "written, but the proxy is unhealthy"));
+        };
+
+        await SaveOnQueuedDispatcherAsync(h, ui);
+
+        Assert.Equal(landedSha, h.Vm.BaseSha256); // the write LANDED — the baseline must follow it
+        Assert.False(h.Vm.IsDirty);
+        // The persistent state posts strictly AFTER the reload (whose publication clears RestartFailedMessage).
+        var persistent = kind == ConfigSaveOutcomeKind.RestartFailed ? h.Vm.RestartFailedMessage : h.Vm.ProxyRejectedMessage;
+        Assert.Equal("written, but the proxy is unhealthy", persistent);
+    }
+
+    [Fact]
+    public async Task an_edit_staged_while_a_queued_dispatcher_save_is_in_flight_stays_unsaved()
+    {
+        // The mid-flight contract (mvvm-F4) must survive the fix: the remaining count is taken ON the UI
+        // thread, after the removal, so an edit made during the save keeps the tab dirty and skips the
+        // reload that would destroy it.
+        using var ui = new QueueingDispatcher();
+        var h = await LoadedOnQueuedDispatcherAsync(ui, "server_names = ['cloudflare']\n", TwoServerList());
+        h.Vm.AddToPool(Row(h.Vm, "quad9")); // the op this save dispatches
+        h.File.NextLoad = ConfigLoadResult.Ok("server_names = ['cloudflare']\n", Sha2);
+        var reachedService = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var outcome = new TaskCompletionSource<ConfigSaveOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
+        h.File.SaveHandler = (_, _, _) =>
+        {
+            reachedService.TrySetResult();
+            return outcome.Task;
+        };
+        var loadsBefore = h.File.LoadCalls;
+
+        var save = h.Vm.SaveAndApplyCommand.ExecuteAsync(null);
+        await reachedService.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        h.Vm.ToggleFilter("require_dnssec", enabled: true); // the user edits — on the UI thread — mid-save
+        outcome.SetResult(new ConfigSaveOutcome(ConfigSaveOutcomeKind.Applied, null));
+        await ui.RunPostsUntilAsync(() => !h.Vm.IsBusy);
+        await save;
+
+        Assert.True(h.Vm.IsDirty); // the mid-flight require_dnssec op survived the removal
+        Assert.Equal(
+            "Configuration saved and applied — an edit made during the save is still unsaved.", h.Vm.SaveNotice);
+        Assert.Equal(loadsBefore + 1, h.File.LoadCalls); // only the fresh read — no reload over the newer edit
+    }
+
+    [Fact]
+    public async Task a_second_save_after_a_queued_dispatcher_save_is_not_a_false_conflict()
+    {
+        // The skipped reload's user-visible damage: the server_names baseline stayed at the PRE-save value,
+        // so the next pick "diverged" from the very server_names this app had just written.
+        using var ui = new QueueingDispatcher();
+        var h = await LoadedOnQueuedDispatcherAsync(ui, "server_names = ['cloudflare']\n", TwoServerList());
+        h.Vm.AddToPool(Row(h.Vm, "quad9"));
+        h.File.NextLoad = ConfigLoadResult.Ok("server_names = ['cloudflare']\n", Sha2);
+        ScriptApplied(h.File, "server_names = ['cloudflare', 'quad9']\n", new string('c', 64));
+        await SaveOnQueuedDispatcherAsync(h, ui);
+
+        h.Vm.UseOnlyThisServer(Row(h.Vm, "quad9")); // re-pick against what is now on disk
+        ScriptApplied(h.File, "server_names = ['quad9']\n", new string('d', 64));
+        await SaveOnQueuedDispatcherAsync(h, ui);
+
+        Assert.Null(h.Vm.ConflictMessage);
+        Assert.Equal(2, h.File.SaveCalls.Count);
+        Assert.Equal("Configuration saved and applied.", h.Vm.SaveNotice);
     }
 
     // ------------------------------------------------------------------ 5j: Add ODoH source lists

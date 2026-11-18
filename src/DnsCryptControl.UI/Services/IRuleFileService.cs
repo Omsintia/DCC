@@ -39,8 +39,9 @@ public enum RuleFileWriteOutcomeKind
     /// <summary>The helper accepted and atomically wrote the file.</summary>
     Applied,
 
-    /// <summary>The helper refused the write (line-validation: per-line cap or NUL) —
-    /// <see cref="RuleFileWriteOutcome.Message"/> carries its reason verbatim (IC-10).
+    /// <summary>The write was refused — the helper's line-validation (per-line cap or NUL),
+    /// or the pre-write protocol-version gate (a mixed UI/helper pair) —
+    /// <see cref="RuleFileWriteOutcome.Message"/> carries the reason verbatim (IC-10).
     /// Nothing written.</summary>
     Rejected,
 
@@ -48,8 +49,8 @@ public enum RuleFileWriteOutcomeKind
     /// The write may or may not have landed; the caller reloads before retrying.</summary>
     HelperUnavailable,
 
-    /// <summary>The serialized request would exceed the transport's 1 MiB frame cap
-    /// (IC-14). Nothing sent, nothing written.</summary>
+    /// <summary>The serialized request would exceed the transport's frame cap
+    /// (<c>IpcSerializer.MaxBytes</c>, 16 MiB — IC-14). Nothing sent, nothing written.</summary>
     TooLarge,
 }
 
@@ -77,9 +78,11 @@ public interface IRuleFileService
     DateTime? TryGetMtime(RuleFileKind kind);
 
     /// <summary>Sends <paramref name="content"/> for <paramref name="kind"/> to the helper's
-    /// unconditional (last-writer-wins) <c>WriteRuleFile</c> verb. Runs the 1 MiB frame
-    /// pre-check FIRST (IC-14 → <see cref="RuleFileWriteOutcomeKind.TooLarge"/> without touching
-    /// the pipe), then maps the helper reply into a typed outcome with verbatim messages
-    /// (IC-10). Never throws.</summary>
+    /// unconditional (last-writer-wins) <c>WriteRuleFile</c> verb. Runs the protocol-version
+    /// gate FIRST (a mixed UI/helper pair → <see cref="RuleFileWriteOutcomeKind.Rejected"/>
+    /// before anything is sent — mirroring the config save path), then the frame pre-check
+    /// against <c>IpcSerializer.MaxBytes</c> (16 MiB; IC-14 →
+    /// <see cref="RuleFileWriteOutcomeKind.TooLarge"/> without touching the pipe), then maps the
+    /// helper reply into a typed outcome with verbatim messages (IC-10). Never throws.</summary>
     Task<RuleFileWriteOutcome> WriteRuleFileAsync(RuleFileKind kind, string content, CancellationToken ct);
 }

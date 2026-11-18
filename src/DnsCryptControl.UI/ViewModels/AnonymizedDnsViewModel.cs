@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -81,6 +82,22 @@ public sealed partial class AnonymizedDnsViewModel : ObservableObject, IDisposab
     /// picker instead of leaving it silently blank.</summary>
     [ObservableProperty]
     private string? _addViaEmptyHint;
+
+    /// <summary>The relays STAGED for the route being built — the chip list under the builder's via combo.
+    /// dnscrypt-proxy accepts several relays per route and picks ONE at random each cert-refresh cycle
+    /// (diversity/failover, not parallel hops), so a multi-entry via is a first-class route shape the
+    /// single via combo could not express. While this is EMPTY the view falls back to the combo's single
+    /// value, so the one-relay quick path costs zero extra clicks. Mutated only through
+    /// <see cref="AddViaRelay"/> / <see cref="RemoveViaRelay"/> / <see cref="SeedViaSelection"/> (the
+    /// rules live there); a successful <see cref="AddRoute"/> consumes it.</summary>
+    public ObservableCollection<string> AddViaSelection { get; } = new();
+
+    /// <summary>The builder's current server (the last <see cref="SetBuilderServer"/> value) — tracked so
+    /// only a GENUINE server change clears the staged via chips: a chip picked for the old server's proto
+    /// could pair a mismatched relay with the new server (which silently kills it — the exact trap the
+    /// pairing filter exists to prevent), while re-asserting the SAME server (the Edit flow) must not
+    /// wipe a seeded selection.</summary>
+    private string _builderServerName = "*";
 
     // ---- displayed anonymization state (derives from ROUTES CONTENT, not the toggle) ----
 
@@ -253,6 +270,7 @@ public sealed partial class AnonymizedDnsViewModel : ObservableObject, IDisposab
                 _relayCandidates = Array.Empty<RouteRelayCandidate>();
                 AddViaCandidates = Array.Empty<string>();
                 AddViaEmptyHint = null;
+                AddViaSelection.Clear();
                 ReadOnlyReason = null;
                 StrictBannerMessage = null;
                 DohBannerMessage = null;
@@ -285,6 +303,9 @@ public sealed partial class AnonymizedDnsViewModel : ObservableObject, IDisposab
             Routes = BuildRouteRows(snapshot.Routes);
             // Wire the add-route builder's via combo (was blank — no ItemsSource). null ⇒ every relay + '*'.
             SetBuilderServer(null);
+            // Staged chips are pre-add BUILDER state, not config state — a reload/revert resets them
+            // unconditionally (SetBuilderServer only clears on a server CHANGE, which '*'→'*' is not).
+            AddViaSelection.Clear();
 
             ClearStagedInternal();
             LoadError = null;
@@ -429,6 +450,15 @@ public sealed partial class AnonymizedDnsViewModel : ObservableObject, IDisposab
     public void SetBuilderServer(string? serverName)
     {
         var name = string.IsNullOrWhiteSpace(serverName) ? "*" : serverName!;
+        if (!string.Equals(name, _builderServerName, StringComparison.Ordinal))
+        {
+            _builderServerName = name;
+            // A genuine server CHANGE resets the staged chips: a chip picked for the old server's proto
+            // could pair a mismatched relay with the new server, which silently kills it (the same
+            // mismatch the candidate filter below refuses to offer). Re-asserting the SAME server (the
+            // Edit flow re-points candidates before seeding) keeps the selection.
+            AddViaSelection.Clear();
+        }
         var candidates = ViaCandidatesFor(name);
         AddViaCandidates = candidates;
 
@@ -449,6 +479,67 @@ public sealed partial class AnonymizedDnsViewModel : ObservableObject, IDisposab
                 "No DNSCrypt relays are available. Restart the proxy so the relays list is cached, or type a relay's sdns:// stamp.",
             _ => null,
         };
+
+    /// <summary>Stages one relay into <see cref="AddViaSelection"/> (the builder's "+ Add relay"
+    /// chip-adder). The rules live HERE, unit-testable, because the view feeds raw combo text: the value
+    /// is trimmed and a blank is refused; duplicates are refused-as-already-staged case-insensitively (a
+    /// candidate matched by case-insensitive name is canonicalized to the candidate's casing — the proxy
+    /// matches relay names exactly); <c>*</c> is EXCLUSIVE both ways (staging <c>*</c> clears the named
+    /// relays and staging a named relay drops <c>*</c> — auto already covers every relay, so mixing is
+    /// meaningless); and the ACCEPTANCE rule is IDENTICAL to the single-relay quick path's
+    /// (<see cref="IsValidVia"/>): <c>*</c>, a listed candidate, a bare relay name of valid shape, or a
+    /// valid relay sdns:// stamp — anything "Add route" would take, "+ Add relay" stages too, so the two
+    /// paths never disagree about the same typed value. Returns <see langword="true"/> when the relay is
+    /// staged (or was already staged) — the view clears the combo only then, leaving a refused value's
+    /// text in place for the user to fix.</summary>
+    public bool AddViaRelay(string? relay)
+    {
+        var name = relay?.Trim();
+        if (string.IsNullOrEmpty(name)) return false;
+
+        if (name != "*")
+        {
+            var candidate = AddViaCandidates.FirstOrDefault(c => string.Equals(c, name, StringComparison.OrdinalIgnoreCase));
+            if (candidate is not null) name = candidate;
+            else if (!IsValidVia(name)) return false;
+        }
+
+        if (AddViaSelection.Any(v => string.Equals(v, name, StringComparison.OrdinalIgnoreCase))) return true;
+
+        if (name == "*") AddViaSelection.Clear();
+        else RemoveViaRelay("*");
+        AddViaSelection.Add(name);
+        return true;
+    }
+
+    /// <summary>Unstages one relay chip (its ✕ button). Case-insensitive so the removal always finds the
+    /// chip the view handed back; a miss is a no-op.</summary>
+    public void RemoveViaRelay(string relay)
+    {
+        ArgumentNullException.ThrowIfNull(relay);
+        for (var i = 0; i < AddViaSelection.Count; i++)
+        {
+            if (string.Equals(AddViaSelection[i], relay, StringComparison.OrdinalIgnoreCase))
+            {
+                AddViaSelection.RemoveAt(i);
+                return;
+            }
+        }
+    }
+
+    /// <summary>Seeds <see cref="AddViaSelection"/> with an existing route's FULL via list (the Edit
+    /// flow). Copies VERBATIM — no trim, dedupe, or candidate gate: these entries came from the on-disk
+    /// config (already valid), and filtering here would silently drop relays on edit — the exact bug this
+    /// chip list fixes (the old single-combo Edit seeded only <c>via[0]</c> and dropped relays 2..N).</summary>
+    public void SeedViaSelection(IReadOnlyList<string> via)
+    {
+        ArgumentNullException.ThrowIfNull(via);
+        AddViaSelection.Clear();
+        foreach (var relay in via)
+        {
+            AddViaSelection.Add(relay);
+        }
+    }
 
     // --------------------------------------------------------------- derived state
 
@@ -656,7 +747,10 @@ public sealed partial class AnonymizedDnsViewModel : ObservableObject, IDisposab
     // --------------------------------------------------------------- route builder
 
     /// <summary>Adds a route row for <paramref name="serverName"/> (a candidate name or <c>*</c>) with
-    /// the given via list (proto-matched relay names, <c>*</c>, or a validated relay sdns:// stamp — IC-7).</summary>
+    /// the given via list (proto-matched relay names, <c>*</c>, or a validated relay sdns:// stamp — IC-7).
+    /// A successful add also consumes the staged <see cref="AddViaSelection"/> chips: the built route is
+    /// what they were staged FOR, so the chip-adder resets for the next route (a refused add keeps them —
+    /// the user fixes the reported value and retries without re-picking every relay).</summary>
     public void AddRoute(string serverName, IReadOnlyList<string> via)
     {
         ArgumentException.ThrowIfNullOrEmpty(serverName);
@@ -694,6 +788,8 @@ public sealed partial class AnonymizedDnsViewModel : ObservableObject, IDisposab
         StageRoutes(next);
         if (!wasEnabled) StageStrictBundle();
         Routes = BuildRouteRows(next);
+        // The staged chips were consumed by the route they built — reset the chip-adder for the next one.
+        AddViaSelection.Clear();
         RefreshStagedState();
     }
 
@@ -878,8 +974,8 @@ public sealed partial class AnonymizedDnsViewModel : ObservableObject, IDisposab
     /// back). Deliberately actionable — pick another pair or turn the feature off; never "Revert"
     /// (after Applied there is nothing staged to revert).</summary>
     public const string PostApplyDeadRouteWarning =
-        "Applied, but DNS isn't resolving through this route — the relay/server pair may be unreachable. " +
-        "Pick a different relay or server; if your network blocks UDP (some VMs and NATs do), turn on " +
+        "Applied, but DNS isn't resolving through this route — its relay(s) or server may be unreachable. " +
+        "Pick different relays or a different server; if your network blocks UDP (some VMs and NATs do), turn on " +
         "'Always use TCP' (force_tcp) in Configuration → Connection; or turn Anonymized DNS off.";
 
     /// <summary>FIX #1: the verification could NOT run (helper unreachable / probe failure) — the
@@ -1039,7 +1135,10 @@ public sealed partial class AnonymizedDnsViewModel : ObservableObject, IDisposab
 
     /// <summary>Maps a save outcome onto the state surfaces (reload-first ordering, mirror ResolversViewModel).
     /// On a write-LANDED outcome (Applied/RestartFailed/ProxyRejected) the stash is persisted (never at toggle
-    /// time / never on Revert): the fresh doc's routes are stashed IFF the routes op wrote empty routes (disable).</summary>
+    /// time / never on Revert): the fresh doc's routes are stashed IFF the routes op wrote empty routes (disable).
+    /// Runs on a pool thread, so it never reads <c>_staged</c>: whether an edit made during the save is still
+    /// staged (skip the reload that would destroy it) comes back FROM the UI-thread removal itself
+    /// (<see cref="RemoveDispatchedOpsAsync"/>).</summary>
     private async Task ApplySaveOutcomeAsync(
         ConfigSaveOutcome outcome, IReadOnlyList<StagedOp> dispatched, IReadOnlyList<AnonRoute> freshRoutesBeforeWrite)
     {
@@ -1047,8 +1146,7 @@ public sealed partial class AnonymizedDnsViewModel : ObservableObject, IDisposab
         {
             case ConfigSaveOutcomeKind.Applied:
                 PersistStashIfDisable(dispatched, freshRoutesBeforeWrite);
-                RemoveDispatchedOps(dispatched);
-                if (_staged.Count == 0)
+                if (await RemoveDispatchedOpsAsync(dispatched).ConfigureAwait(false) == 0)
                 {
                     await LoadAsync(CancellationToken.None).ConfigureAwait(false);
                     _ui.Post(() =>
@@ -1075,8 +1173,7 @@ public sealed partial class AnonymizedDnsViewModel : ObservableObject, IDisposab
 
             case ConfigSaveOutcomeKind.RestartFailed:
                 PersistStashIfDisable(dispatched, freshRoutesBeforeWrite);
-                RemoveDispatchedOps(dispatched);
-                if (_staged.Count == 0)
+                if (await RemoveDispatchedOpsAsync(dispatched).ConfigureAwait(false) == 0)
                     await LoadAsync(CancellationToken.None).ConfigureAwait(false);
                 _ui.Post(() => RestartFailedMessage = outcome.Message
                     ?? "config saved, but the proxy restart failed — status unverified");
@@ -1084,8 +1181,7 @@ public sealed partial class AnonymizedDnsViewModel : ObservableObject, IDisposab
 
             case ConfigSaveOutcomeKind.ProxyRejected:
                 PersistStashIfDisable(dispatched, freshRoutesBeforeWrite);
-                RemoveDispatchedOps(dispatched);
-                if (_staged.Count == 0)
+                if (await RemoveDispatchedOpsAsync(dispatched).ConfigureAwait(false) == 0)
                     await LoadAsync(CancellationToken.None).ConfigureAwait(false);
                 _ui.Post(() => ProxyRejectedMessage = outcome.Message
                     ?? "new config rejected by proxy — Revert or re-edit");
@@ -1157,19 +1253,45 @@ public sealed partial class AnonymizedDnsViewModel : ObservableObject, IDisposab
         _stateStore.Save(state);
     }
 
-    private void RemoveDispatchedOps(IReadOnlyList<StagedOp> dispatched)
+    /// <summary>Removes EXACTLY the dispatched ops (write-landed; an op re-staged during the save is a new
+    /// instance and survives) and re-derives dirty/block/derived state, then completes with the number of
+    /// staged edits that REMAIN — the caller's "reload" vs "an edit made during the save is still unsaved" signal.
+    ///
+    /// <para>Threading contract: <c>_staged</c> is UI-thread-confined (IC-5), so the removal AND the count
+    /// happen inside ONE dispatcher post and the count travels back through the task. The caller runs on a
+    /// pool thread and must branch on that result, never re-read <c>_staged</c>: production's Post is
+    /// <c>Dispatcher.BeginInvoke</c>, so right after posting the removal has NOT run yet — reading the count
+    /// there made every normal save look edited-mid-flight and skip its post-save reload. The task runs its
+    /// continuations asynchronously, so the rest of the save resumes on the pool, never inline on the UI
+    /// thread; a fault inside the post faults the task (the save's <c>finally</c> still clears busy) instead
+    /// of stranding the save. An inline dispatcher (the unit tests) returns an already-completed task; a post
+    /// dropped at shutdown leaves it pending and the save simply stops — nothing is left to update.</para></summary>
+    private Task<int> RemoveDispatchedOpsAsync(IReadOnlyList<StagedOp> dispatched)
     {
+        var removed = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         _ui.Post(() =>
         {
-            foreach (var op in dispatched)
+            int remaining;
+            try
             {
-                if (_staged.TryGetValue(op.KeyPath, out var current) && ReferenceEquals(current, op))
-                    _staged.Remove(op.KeyPath);
+                foreach (var op in dispatched)
+                {
+                    if (_staged.TryGetValue(op.KeyPath, out var current) && ReferenceEquals(current, op))
+                        _staged.Remove(op.KeyPath);
+                }
+                IsDirty = _staged.Count > 0;
+                RecomputeSaveBlock();
+                RefreshDerivedState();
+                remaining = _staged.Count;
             }
-            IsDirty = _staged.Count > 0;
-            RecomputeSaveBlock();
-            RefreshDerivedState();
+            catch (Exception ex)
+            {
+                removed.SetException(ex);
+                return;
+            }
+            removed.SetResult(remaining);
         });
+        return removed.Task;
     }
 
     [RelayCommand(CanExecute = nameof(CanRevert))]

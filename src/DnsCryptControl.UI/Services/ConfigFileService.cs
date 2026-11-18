@@ -22,6 +22,12 @@ namespace DnsCryptControl.UI.Services;
 /// </summary>
 public sealed class ConfigFileService : IConfigFileService
 {
+    /// <summary>The CONFIG save's own business cap (1 MiB), deliberately tighter than the v5
+    /// transport frame cap (<see cref="IpcSerializer.MaxBytes"/>, 16 MiB — that headroom exists
+    /// for rule-file writes): a toml anywhere near 1 MiB is corrupt, and a save the 8 MiB
+    /// <see cref="ConfigReadGuard"/> could never read back would be a self-inflicted brick.</summary>
+    private const int MaxConfigRequestBytes = 1_048_576;
+
     private static readonly TimeSpan DefaultStatusPollInterval = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan DefaultStatusPollTimeout = TimeSpan.FromSeconds(10);
 
@@ -118,11 +124,14 @@ public sealed class ConfigFileService : IConfigFileService
         // Step 1 — size pre-check on the ACTUAL request frame (envelope + JSON string-
         // escaping inflation, exactly the bytes HelperClient would send). The transport
         // itself fails closed on oversize (C1), but that surfaces as a lost reply —
-        // this gives the friendly outcome without touching the pipe again. The
-        // comparison mirrors IpcFraming.WriteFrameAsync's guard (> MaxBytes rejects).
+        // this gives the friendly outcome without touching the pipe again. The CONFIG
+        // save keeps its own 1 MiB business cap even though the v5 transport frame allows
+        // 16 MiB (for rule files): a toml near 1 MiB is already corrupt (a real config is
+        // a few KB), and ConfigReadGuard refuses to read anything past 8 MiB — allowing a
+        // save the app could never load back would be a self-inflicted brick.
         var payloadJson = IpcSerializer.SerializePayload(new WriteConfigPayload(candidateText, baseSha256));
         var requestJson = IpcSerializer.Serialize(new IpcRequest(IpcCommandType.WriteConfig, payloadJson));
-        if (Encoding.UTF8.GetByteCount(requestJson) > IpcSerializer.MaxBytes)
+        if (Encoding.UTF8.GetByteCount(requestJson) > MaxConfigRequestBytes)
         {
             return new ConfigSaveOutcome(
                 ConfigSaveOutcomeKind.TooLarge,
